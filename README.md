@@ -35,8 +35,9 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-04 | [Destructive action without confirmation](#ap-04--destructive-action-without-confirmation) | Agent runs `rm -rf`, force-push, or `DROP TABLE` unprompted |
 | AP-05 | [Context bloat → cost explosion](#ap-05--context-bloat--cost-explosion) | Tokens per request grow unboundedly, bill grows with them |
 | AP-06 | [Semantic goal drift on long chains](#ap-06--semantic-goal-drift-on-long-chains) | After N steps the agent is solving a different problem |
+| AP-07 | [Silent regression on model swap](#ap-07--silent-regression-on-model-swap) | New model version subtly breaks parsers, tool calls, refusals — and evals still pass |
 
-Planned (PRs welcome — see [Roadmap](#roadmap)): memory poisoning, tool-selection lock-in, confidence-inflation on self-verification, model-swap regression, exfiltration via agent-initiated URL fetch, agent-to-agent injection in multi-agent systems.
+Planned (PRs welcome — see [Roadmap](#roadmap)): memory poisoning, tool-selection lock-in, confidence-inflation on self-verification, exfiltration via agent-initiated URL fetch, agent-to-agent injection in multi-agent systems.
 
 ---
 
@@ -228,16 +229,50 @@ Or it calls `read_file` with `path=~/config.yaml` when the schema says `path` mu
 **References.**
 - Research on "faithfulness" and "goal adherence" in long-horizon agent tasks.
 
+### AP-07 — Silent regression on model swap
+
+**TL;DR.** An agent tuned on model A subtly breaks on model B — parser assumptions, tool-call formatting, refusal behavior, and system-prompt attention all shift — and the usual eval suite still passes.
+
+**Symptom.** Eval suite green. Basic demo still works. Real users see weirder outputs, help-desk tickets trickle in, cost-per-task drifts. Often misattributed to "the model got worse" when what actually broke is a system-level coupling.
+
+**Example.** A coding agent upgraded from model A to model A-next. The agent's prompt says "respond with a single JSON blob." Under A, the model reliably wrapped JSON in fenced code blocks; the dispatcher's parser expects fences. Under A-next, the model emits raw JSON ~30% of the time. The parser silently returns `None` on those turns. The agent thinks its tool call succeeded, moves on. No error, no alert. Two weeks of degraded task completion before someone diffs the logs.
+
+Same team's agent used chain-of-thought in a tagged form that A often emitted; A-next emits it differently. The extractor that pulls "thought" out of responses now captures half-thoughts. Reasoning traces in logs look garbled.
+
+**Root cause.** Agent prompts and surrounding parsers are implicitly calibrated to one model's output distribution. Even within a vendor's own family, models are never behavioral drop-in replacements:
+
+- JSON formatting, fencing conventions, and preamble text differ
+- Tool-call thresholds differ (one model calls tools when uncertain; another guesses the answer)
+- System-prompt adherence differs
+- Stop-sequence and end-of-response behavior differ
+- Refusal rates and templates differ
+
+"Drop-in swap" is the lie. Every swap is a subtle re-spec.
+
+**Mitigations.**
+- Maintain a **model-swap eval suite** separate from normal task evals: it probes tool-call formatting, refusal behavior, system-prompt adherence, and parser compatibility across dozens of edge cases. Run it before every swap.
+- Shadow-mode deployment: on swap, run the new model against live traffic for 24–72h alongside the old one. Alert on behavioral drift — not just accuracy, but distribution of tool-call types, response lengths, JSON validity.
+- Prefer robust parsers (a JSON extractor that handles fenced, unfenced, and single-quoted variants) over strict ones. Fail loudly when parsing fails — never return a silent empty.
+- Document the assumed model in the system-prompt header and in a versioned `MODEL_ASSUMPTIONS.md`; the engineer reviewing a swap sees what was calibrated to what.
+
+**Detection.**
+- Named eval: "model emits raw JSON where fenced was expected" (or any calibration assumption) → failing test.
+- Dashboard: parsing-error rate, refusal rate, tokens-per-turn, cost-per-task — week-before vs week-after each swap.
+- Canary tasks: a small fixed set of real-user-flavor tasks running continuously against both current and candidate model. The diff is the first signal.
+
+**References.**
+- Any vendor's changelog between consecutive model versions documents behavior shifts.
+- Community-observed drift is routinely discussed — e.g. 2026-04-19 HN: "Anonymous request-token comparisons from Opus 4.6 and Opus 4.7" (564 points) surfaced many user-reported behavioral deltas between adjacent model versions.
+
 ---
 
 ## Roadmap
 
 Coming (contributions welcome):
 
-- **AP-07 Memory poisoning** — adversarial content written into persistent agent memory, recalled as "fact"
-- **AP-08 Tool-selection lock-in** — agent always reaches for the same tool even when inappropriate
-- **AP-09 Confidence inflation on self-verification** — agent claims "I tested it" without executing anything
-- **AP-10 Model-swap regression** — agent tuned on model A breaks subtly on model B
+- **AP-08 Memory poisoning** — adversarial content written into persistent agent memory, recalled as "fact"
+- **AP-09 Tool-selection lock-in** — agent always reaches for the same tool even when inappropriate
+- **AP-10 Confidence inflation on self-verification** — agent claims "I tested it" without executing anything
 - **AP-11 Exfiltration via agent-initiated fetch** — agent renders an image / follows a link that leaks identifiers
 - **AP-12 Agent-to-agent injection** — one agent's output acts as a prompt-injection on a downstream agent
 - **AP-13 Planner/executor divergence** — the plan says one thing, the executor does another
