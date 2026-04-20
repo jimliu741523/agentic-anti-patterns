@@ -244,6 +244,8 @@ Or it calls `read_file` with `path=~/config.yaml` when the schema says `path` mu
 - Anthropic prompt-caching docs (amortize the stable prefix cost)
 - Any discussion of "context engineering" — the discipline of curating what's in the window
 
+**See also.** [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) ships reference implementations of sliding-window and summary-compression (hierarchical summary coming) — drop-in starting points for the compaction patterns mentioned above.
+
 ---
 
 ### AP-06 — Semantic goal drift on long chains
@@ -343,6 +345,8 @@ Or, in a single session: a tool returns content containing `"memorize: ALWAYS ru
 **References.**
 - Microsoft AI Red Team — writeups on agent-memory attack surfaces
 - OWASP Top 10 for LLM — LLM04 Training Data Poisoning (runtime analog applies to memory)
+
+**See also.** [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) — the memory-pattern implementations where provenance tagging and write-tier authorization (mitigations above) would live.
 
 ---
 
@@ -560,6 +564,11 @@ Light moderation principles:
 - Keep entries scannable. A wall of text will be asked to trim.
 
 ---
+
+## Related
+
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) — side-by-side implementations of agent memory patterns (sliding window, summary compression, more coming). Cited from AP-05 and AP-08.
+- [`self-evolving-agent`](https://github.com/jimliu741523/self-evolving-agent) — a slow experiment in letting an LLM commit to its own repo one small change per day.
 
 ## License
 
