@@ -259,6 +259,8 @@ Or it calls `read_file` with `path=~/config.yaml` when the schema says `path` mu
 **References.**
 - Research on "faithfulness" and "goal adherence" in long-horizon agent tasks.
 
+---
+
 ### AP-07 — Silent regression on model swap
 
 **TL;DR.** An agent tuned on model A subtly breaks on model B — parser assumptions, tool-call formatting, refusal behavior, and system-prompt attention all shift — and the usual eval suite still passes.
@@ -292,7 +294,8 @@ Same team's agent used chain-of-thought in a tagged form that A often emitted; A
 
 **References.**
 - Any vendor's changelog between consecutive model versions documents behavior shifts.
-- Community-observed drift is routinely discussed — e.g. 2026-04-19 HN: "Anonymous request-token comparisons from Opus 4.6 and Opus 4.7" (564 points) surfaced many user-reported behavioral deltas between adjacent model versions.
+- Simon Willison — [Changes in the system prompt between Claude Opus 4.6 and 4.7](https://simonwillison.net/2026/Apr/18/opus-system-prompt/) — a concrete diff between adjacent versions showing how much the implicit contract changes.
+- Community-observed drift is routinely discussed — e.g. 2026-04-19 HN: "Anonymous request-token comparisons from Opus 4.6 and 4.7" (564 points) surfaced many user-reported behavioral deltas between adjacent model versions.
 
 ---
 
@@ -387,7 +390,7 @@ Or: agent refactors a TypeScript file and asserts *"types check and imports reso
 - Weekly human spot-check: sample N sessions, manually verify the agent's verification claims.
 
 **References.**
-- Discussions of "confabulation" in coding-agent reviews; Simon Willison on fabricated tool output
+- Discussions of "confabulation" and "hallucinated verification" in coding-agent reviews; related: Simon Willison's ongoing writing on LLM fabrication and calibration — https://simonwillison.net/
 
 ---
 
