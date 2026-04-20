@@ -79,8 +79,9 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-11 | [Exfiltration via agent-initiated fetch](#ap-11--exfiltration-via-agent-initiated-fetch) | Agent fetches or renders an attacker-controlled URL that encodes secrets in the query string |
 | AP-12 | [Agent-to-agent injection](#ap-12--agent-to-agent-injection) | In multi-agent chains, prompt injection laundered through one agent compromises the next |
 | AP-13 | [Planner / executor divergence](#ap-13--planner--executor-divergence) | The plan says one thing, the executor does another; the trace looks fine until you diff them |
+| AP-14 | [Silent retry masking failure](#ap-14--silent-retry-masking-failure) | Automatic retries turn persistent bugs into transient-looking noise; metrics stay green while the system hides real problems |
 
-Planned (PRs welcome — see [Roadmap](#roadmap)): silent retry masking failure.
+Planned (PRs welcome — see [Roadmap](#roadmap)): tool-description drift, RAG retrieval poisoning, autonomy creep.
 
 ---
 
@@ -505,11 +506,47 @@ Or: a planner/executor split. Planner agent receives an injected task embedded i
 
 ---
 
+### AP-14 — Silent retry masking failure
+
+**TL;DR.** Automatic retry logic — at the agent framework, in a tool wrapper, or both — turns a persistent bug into transient-looking noise. Dashboards stay green; operators never see the failure signal; the bug stays in production until load rises and the retry budget breaks.
+
+**Symptom.** Users occasionally report "ugh, slow today" and nothing else. Task success rate looks normal. Error rate looks normal. But a specific class of task or input takes the full retry budget every time and only succeeds because the retries eventually get lucky. The dashboard has no metric for "this really failed, we just retried our way out of it."
+
+**Example.** An agent's `search_wiki` tool has a retry wrapper: 3 attempts, exponential backoff. A bug in the wiki client causes the first call to deadlock-timeout on 30% of queries. Retries succeed because the client recovers state between attempts. Agent metrics show 99.8% task success. Operator sees nothing. Three weeks later, wiki traffic doubles; retries start exhausting the 3-attempt budget; success rate collapses from 99.8% to 70% overnight. The root cause has been there the whole time.
+
+Or subtler: a tool returns a 500 on a specific input class due to a race in the backend. The retry succeeds because the second attempt hits a different cache. The data returned on retry is slightly different from what the first call would have returned. Agent proceeds with drifted data. Downstream correctness bug with no stack trace.
+
+**Root cause.**
+- Retry logic treats every failure as transient.
+- No distinction between "retryable network glitch," "persistent tool bug," and "semantic input error that retrying cannot fix."
+- Metrics are collected at the retry-wrapper's output (success / fail) rather than at the inner call level, so the signal that would reveal the upstream bug is destroyed.
+- Frameworks often add their own retry layer on top of the tool's retry layer. Compounded retries multiply the soaking effect.
+
+**Mitigations.**
+- **Classify failures.** Distinguish transient (network, 503, backoff-cured) from persistent (bug, 500 on same input twice) from semantic (invalid argument, logic error). Only retry the transient class; surface the others immediately.
+- **Preserve the inner signal.** On retry-success, keep the original failure in logs and metrics with full context. Expose "retries-consumed-per-task" as a first-class metric alongside success rate.
+- **Retry budgets, not retry counts.** Per-task or per-hour budgets that can be exhausted. When a budget burns through, the system alarms rather than silently continuing.
+- **One retry layer, not two.** Pick the layer that owns retry semantics and make the others fail-fast. Compounded retries hide root causes.
+- **Chaos injection.** Inject known failure modes into tools in staging; verify the alerting surface is loud when the backend is actually broken, not just "success rate stayed constant because retries absorbed everything."
+
+**Detection.**
+- Instrument retry-inner-attempt failure rate separately from retry-outer success rate. Alert on the inner metric rising even when outer looks fine.
+- Per-input-class error distributions. If one input class has a 100% first-call failure rate but a 100% retry-success rate, that's a bug hiding in retry soak.
+- Latency distribution: tasks that burn the full retry budget have distinctly bimodal latency. Watch the tail and correlate with cost.
+
+**References.**
+- SRE literature on retry storms and retry amplification
+- Post-incident reports where retry logic masked an upstream bug for weeks or months
+
+---
+
 ## Roadmap
 
 Coming (contributions welcome):
 
-- **AP-14 Silent retry masking failure** — automatic retries hide a persistent bug from metrics
+- **AP-15 Tool-description drift** — agent's implicit model of a tool diverges from the tool's current behavior after a schema/behavior update; calls work under old assumptions and fail silently
+- **AP-16 RAG retrieval poisoning** — retrieval surfaces untrusted content that the agent treats as authority (cousin of AP-08 memory poisoning but specific to retrieve-on-demand rather than long-term stores)
+- **AP-17 Autonomy creep** — operational policy grants the agent more tools or higher-impact tools over time without re-review, until its effective privilege level exceeds anything explicitly approved
 
 ---
 
