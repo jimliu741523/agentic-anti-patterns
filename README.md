@@ -8,6 +8,17 @@ Every week a new `awesome-ai-agents` list ships. Meanwhile teams shipping real a
 
 **Non-goals.** Model-choice holy wars. Benchmark leaderboards. Hypothetical failures nobody has actually seen.
 
+## About this catalog
+
+Most entries started as things I'd already watched break — on an on-call shift, in code review, or in someone else's published postmortem. Some were drafted faster with LLM assistance; the shape of each entry (TL;DR / symptom / example / root cause / mitigations / detection) is structured on purpose, for scanning during an incident, not to disguise what it is.
+
+The bar I hold every entry to:
+1. Specific enough that you can recognize the failure in your own system.
+2. Grounded in a real incident, a reproduction, or a public writeup.
+3. Actionable enough to give you something to do tomorrow.
+
+If an entry doesn't meet that bar, open an issue — the entries with the most value are the ones that survive contact with someone who's actually been burned by that failure mode.
+
 ---
 
 ## What a real agent failure looks like
@@ -67,8 +78,9 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-10 | [Confidence inflation on self-verification](#ap-10--confidence-inflation-on-self-verification) | Agent claims "I tested this" without having actually run anything |
 | AP-11 | [Exfiltration via agent-initiated fetch](#ap-11--exfiltration-via-agent-initiated-fetch) | Agent fetches or renders an attacker-controlled URL that encodes secrets in the query string |
 | AP-12 | [Agent-to-agent injection](#ap-12--agent-to-agent-injection) | In multi-agent chains, prompt injection laundered through one agent compromises the next |
+| AP-13 | [Planner / executor divergence](#ap-13--planner--executor-divergence) | The plan says one thing, the executor does another; the trace looks fine until you diff them |
 
-Planned (PRs welcome — see [Roadmap](#roadmap)): planner/executor divergence, silent retry masking failure.
+Planned (PRs welcome — see [Roadmap](#roadmap)): silent retry masking failure.
 
 ---
 
@@ -463,11 +475,40 @@ Or: a planner/executor split. Planner agent receives an injected task embedded i
 
 ---
 
+### AP-13 — Planner / executor divergence
+
+**TL;DR.** In a planner/executor split, the plan the planner writes is reasonable; the actions the executor takes are also reasonable-looking; but the actions don't actually implement the plan. Post-hoc reviewers read both and miss the gap because each half is internally coherent.
+
+**Symptom.** Task completes without errors. Plan is filed, execution trace is logged. A human reviewing either artifact alone approves. But the end state doesn't match what the plan said to build. User asks "why is feature X missing?" and nobody can point to a moment where something failed — each step looked fine at the time.
+
+**Example.** A coding agent is asked to add pagination to a list endpoint. Planner writes: "1) add `?page` and `?per_page` query params, 2) slice the DB query, 3) return `total` and `page` in the response." Executor implements steps 1 and 3 but skips step 2 because by the time it reaches that step, the prompt window's already filled with other context and the step falls out of attention. The response shape matches the plan. The query does NOT slice. Pagination doesn't actually paginate. Passes code review. Ships. Breaks under a large dataset.
+
+**Root cause.**
+- The planner and executor run in different contexts; the executor sees the plan as one of many things in its prompt, not as a contract.
+- Planner outputs are prose, not enforceable; there's no validator that says "this tool call corresponds to step 2 of the plan."
+- Executor's own partial-completion heuristics (declaring the subtask done because "it looks done enough") can drop steps silently.
+- Long plans exacerbate the problem: late steps fall out of the attention budget.
+
+**Mitigations.**
+- **Plan as a checklist, not prose.** The planner outputs a structured list of atomic goals with acceptance criteria for each. Executor must emit a mapping from tool calls to goal IDs.
+- **Per-step verification.** After each executor action, check: does the acceptance criterion for this step's goal hold? If not, flag and either retry or escalate. Cheap to implement, catches most divergence.
+- **Goal pinning.** Every executor turn re-reads the unfinished portion of the plan first. Never work from "here's what I was going to do next" pulled from chain-of-thought.
+- **End-of-task validation.** Before declaring the task complete, the executor lists every goal in the plan alongside which tool call satisfied it. An unfilled slot blocks completion.
+
+**Detection.**
+- Post-hoc audit: sample completed tasks and diff the plan against the actual changes. A high per-task "plan lines with no corresponding action" rate is the signal.
+- End-of-task alignment check as a CI gate: if the plan had N goals and the completion log references M < N of them, fail the build.
+- Canary tasks with known minimum-diff plans; measure coverage of actual changes vs. plan items.
+
+**References.**
+- Research on long-horizon agent faithfulness / plan adherence; the failure mode is a long-known issue in autonomous planning but under-documented in LLM agent settings.
+
+---
+
 ## Roadmap
 
 Coming (contributions welcome):
 
-- **AP-13 Planner/executor divergence** — the plan says one thing, the executor does another
 - **AP-14 Silent retry masking failure** — automatic retries hide a persistent bug from metrics
 
 ---
