@@ -80,8 +80,9 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-12 | [Agent-to-agent injection](#ap-12--agent-to-agent-injection) | In multi-agent chains, prompt injection laundered through one agent compromises the next |
 | AP-13 | [Planner / executor divergence](#ap-13--planner--executor-divergence) | The plan says one thing, the executor does another; the trace looks fine until you diff them |
 | AP-14 | [Silent retry masking failure](#ap-14--silent-retry-masking-failure) | Automatic retries turn persistent bugs into transient-looking noise; metrics stay green while the system hides real problems |
+| AP-15 | [Tool-description drift](#ap-15--tool-description-drift) | Agent's mental model of a tool (from its prompt description) diverges from the tool's actual current behavior; calls work under old assumptions |
 
-Planned (PRs welcome — see [Roadmap](#roadmap)): tool-description drift, RAG retrieval poisoning, autonomy creep.
+Planned (PRs welcome — see [Roadmap](#roadmap)): RAG retrieval poisoning, autonomy creep.
 
 ---
 
@@ -544,11 +545,47 @@ Or subtler: a tool returns a 500 on a specific input class due to a race in the 
 
 ---
 
+### AP-15 — Tool-description drift
+
+**TL;DR.** The agent's mental model of a tool — shaped by the tool's description text in the system prompt — diverges from the tool's actual current behavior after a schema or behavior change. Calls go out under the old assumptions and either fail silently, produce wrong results, or leave new capabilities unused.
+
+**Symptom.** Tool call rate looks normal. No exception on the tool side. But the downstream output is wrong in ways the agent doesn't catch: the agent references a field that no longer exists, ignores a new parameter it doesn't know about, or treats a redirect response as real content.
+
+**Example.** `search_wiki` used to return `{title, url, excerpt}`. A refactor renamed `excerpt` to `snippet`. The system prompt still describes the old shape. The agent writes code paths that access `excerpt`; they silently return empty; the agent proceeds with blank content as if it were a legit result.
+
+Or: `send_email` historically took three arguments `(to, subject, body)`. Someone added an optional `attachments=[]`. The agent's prompt documentation still lists three. Emails go out fine — but the agent can never use the new attachment capability, so the feature is effectively dead from the agent's side.
+
+Or: `fetch_url` used to auto-follow redirects. A security update now returns 302 responses raw. The agent parses the 302 HTML preamble as if it were the target page's content and makes wrong inferences.
+
+**Root cause.**
+- Tool descriptions are static text baked into the system prompt. Tool behavior is dynamic code. Nothing keeps them in sync.
+- Framework tool-update workflows rarely flag "the prompt needs a matching update."
+- The model may carry strong training-era priors for common tool names (`send_email`, `search`) that override the current explicit description.
+- Schema evolution often isn't versioned at the agent-prompt layer, so nobody can tell what contract the agent currently believes in.
+
+**Mitigations.**
+- **Single source of truth.** Auto-generate the tool-description block from the tool's actual code or schema. Any change triggers regeneration; the prompt can't drift.
+- **Version tool schemas.** Include a schema version in the description; log agent calls that reference old versions. This catches mid-deploy mismatches.
+- **Integration tests.** Exercise each declared tool against its current implementation on every deploy. A failing field-access test is a drift alarm.
+- **Runtime introspection.** Expose a `describe_tool(name)` utility so the agent can fetch the current contract at the start of a task rather than relying solely on baked-in text.
+- **Explicit deprecation window.** When a tool's return shape changes, keep the old field for N days while agents catch up.
+
+**Detection.**
+- Periodic audit: diff the tool-description block in the live system prompt against tool signatures in source. Any mismatch is the signal.
+- Tool-specific parse-failure rate. If tool A's downstream parsing errors jump after a tool-update commit, likely drift.
+- Canary queries that exercise specific tool fields. If they stop producing the expected result, the contract has shifted.
+
+**Related.** Contrast with [AP-03 — Hallucinated tool calls](#ap-03--hallucinated-tool-calls): AP-03 is the agent inventing tools that don't exist. AP-15 is the inverse — tools that do exist, but the agent has a stale picture of them.
+
+**References.**
+- Function-calling API vendors occasionally publish best practices around tool-change handling; the pattern is analogous to API deprecation handling, just shifted one layer up into prompt-space.
+
+---
+
 ## Roadmap
 
 Coming (contributions welcome):
 
-- **AP-15 Tool-description drift** — agent's implicit model of a tool diverges from the tool's current behavior after a schema/behavior update; calls work under old assumptions and fail silently
 - **AP-16 RAG retrieval poisoning** — retrieval surfaces untrusted content that the agent treats as authority (cousin of AP-08 memory poisoning but specific to retrieve-on-demand rather than long-term stores)
 - **AP-17 Autonomy creep** — operational policy grants the agent more tools or higher-impact tools over time without re-review, until its effective privilege level exceeds anything explicitly approved
 
