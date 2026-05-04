@@ -66,6 +66,13 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## Catalog
 
+**Browse by failure stage:**
+- **Input / ingress** — [AP-01](#ap-01--prompt-injection-via-tool-output) · [AP-15](#ap-15--tool-description-drift) · [AP-16](#ap-16--mcp-server-trust-boundary-collapse) · [AP-17](#ap-17--rag-retrieval-poisoning)
+- **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs)
+- **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure)
+- **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning)
+- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure)
+
 | # | Anti-pattern | One-line |
 |---|---|---|
 | AP-01 | [Prompt injection via tool output](#ap-01--prompt-injection-via-tool-output) | Agent follows instructions embedded in data it fetched |
