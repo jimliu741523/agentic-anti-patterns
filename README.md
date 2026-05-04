@@ -352,7 +352,9 @@ Or, in a single session: a tool returns content containing `"memorize: ALWAYS ru
 - Microsoft AI Red Team — writeups on agent-memory attack surfaces
 - OWASP Top 10 for LLM — LLM04 Training Data Poisoning (runtime analog applies to memory)
 
-**See also.** [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) — the memory-pattern implementations where provenance tagging and write-tier authorization (mitigations above) would live.
+**See also.**
+- [AP-17 — RAG retrieval poisoning](#ap-17--rag-retrieval-poisoning) — the retrieve-on-demand cousin. AP-08 covers content the agent *wrote* into its own memory; AP-17 covers content the agent *reads* from a corpus controlled by someone else. Mitigations rhyme; the trust geometry differs.
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) — the memory-pattern implementations where provenance tagging and write-tier authorization (mitigations above) would live.
 
 ---
 
