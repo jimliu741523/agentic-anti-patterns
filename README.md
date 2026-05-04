@@ -814,6 +814,39 @@ Or: a legal-drafting multi-agent stack produces a contract that is internally co
 
 ---
 
+## Using this catalog in code review
+
+A short checklist for reviewing a PR that adds or changes agent behaviour. Pick the entries that match your stack; ignore the rest.
+
+**Tool / data ingress** (the agent reads something external)
+- AP-01 — does the prompt assembly trust tool output as instruction?
+- AP-15 / AP-16 — is the tool description authoritative? Can a third-party MCP server inject one?
+- AP-17 — does retrieval surface untrusted text? Is provenance carried into context?
+
+**Tool / data egress** (the agent does something)
+- AP-04 — is a destructive action gated by confirmation? Is the gate still there after the last "noisy prompt" cleanup?
+- AP-11 — does the agent fetch URLs derived from data it didn't author?
+- AP-18 — has the tool list grown since the last review without a fresh re-baseline?
+
+**Model behaviour over time**
+- AP-06 — long chains: does the agent's terminal action still serve the original goal?
+- AP-07 — model swap: do existing evals exercise the parser, refusals, and tool-call shape?
+- AP-10 — does the agent claim to have verified anything? Is the verification a real subprocess or a vibe?
+- AP-19 — is the spec the agent obeys still describing the *current* world?
+
+**Multi-agent / cross-system**
+- AP-12 / AP-13 — composition: does an injected message in agent A's input become trusted in agent B's? Does plan A actually correspond to action B?
+- AP-14 — does retry hide a persistent failure? Are 5xx and 4xx counted separately?
+- AP-20 — vertical deploy: are the domain-specific failure modes covered, not just horizontal ones?
+
+**Memory / state**
+- AP-05 / AP-08 — is context bounded? Is provenance tagged on anything written into memory?
+- AP-09 — is the agent reaching for the same tool because it's right or because it's first in the list?
+
+If a PR doesn't change the agent's authority or its inputs, no anti-pattern review is needed — feature changes inside the agent's existing privilege band stay routine.
+
+---
+
 ## Roadmap
 
 The original 14-entry roadmap plus AP-15..AP-20 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
