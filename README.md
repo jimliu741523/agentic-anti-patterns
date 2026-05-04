@@ -87,6 +87,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-17 | [RAG retrieval poisoning](#ap-17--rag-retrieval-poisoning) | Retrieval-on-demand surfaces attacker-controlled content from a corpus the agent treats as authoritative; the injected content shapes the next answer or tool call |
 | AP-18 | [Autonomy creep](#ap-18--autonomy-creep) | Operational policy grants the agent more tools or higher-impact tools over time without re-review; effective privilege exceeds anything explicitly approved |
 | AP-19 | [Spec-drift on rigid agent specs](#ap-19--spec-drift-on-rigid-agent-specs) | A spec-driven agent encodes the *original* problem; reality moves on, the spec doesn't, and the agent fails confidently against a problem that no longer exists |
+| AP-20 | [Multi-agent vertical-domain failure](#ap-20--multi-agent-vertical-domain-failure) | Multi-agent stacks deployed to high-stakes verticals (finance, medical, legal) fail in domain-specific ways that horizontal anti-patterns don't predict — and the consequences are larger than horizontal use cases |
 
 ---
 
@@ -769,12 +770,51 @@ This is the inverse failure mode of [AP-13](#ap-13--planner--executor-divergence
 
 ---
 
+### AP-20 — Multi-agent vertical-domain failure
+
+**TL;DR.** A multi-agent system designed to be domain-general gets pointed at a high-stakes vertical (financial trading, medical triage, legal drafting). Horizontal failure modes still apply, but the vertical adds its own — domain-specific oracles, regulatory edges, and stakes-of-error asymmetries — that the horizontal pattern catalog wasn't designed to predict. The consequences are also larger.
+
+**Symptom.** The system passes its general-purpose evals. It fails on cases that only domain experts would think to write tests for. Failures cluster around the parts of the domain where "correct under the model's prior" diverges from "correct under the regulator / clinician / fiduciary standard". Operators who lack domain training don't see the failures until an outside expert flags them.
+
+**Example.** A multi-agent trading stack composes a research-agent, a strategy-agent, and an execution-agent. Each agent's output is well-formed. Together they compose a strategy that violates a market-maker rebate-tier rule the research-agent never surfaced because public docs underspecify it. The strategy executes; the desk is in violation by the second trade. None of the horizontal anti-patterns (injection, drift, retry) explain it — the failure is "the agent doesn't know what it doesn't know about microstructure".
+
+Or: a medical-triage assistant correctly summarizes patient intake, correctly proposes likely diagnoses, and correctly cites guidelines. It misses a class of presentations that look textbook but, in a specific patient population, require an immediate workup the guideline only mentions in a footnote. The agent's behavior is "correct" against the cited guideline and "wrong" against best practice in that population.
+
+Or: a legal-drafting multi-agent stack produces a contract that is internally consistent and reads well. A senior partner notices a missing carve-out that has been standard in this jurisdiction since a 2024 ruling that didn't make it into training data and isn't surfaced by any of the agent's retrieval sources.
+
+**Root cause.**
+- Generality is in tension with domain depth. The same architectural choices that make a horizontal multi-agent stack flexible (loose tool interfaces, free-text reasoning, plug-in research agents) make it brittle on domain edges where rigid checking would catch the failure.
+- High-stakes verticals have *implicit* knowledge — heuristics, customs, recent rulings, microstructure quirks — that is rarely written down in a form retrievable by a general agent. Public docs are necessary, not sufficient.
+- Each individual agent in the stack passes its own evals; the *composition* fails. There is no joint eval that exercises the domain-specific seam.
+- The error asymmetry is unbalanced: a horizontal agent's wrong recipe inconveniences someone; a vertical agent's wrong trade / diagnosis / contract carries six-to-eight-figure or human-safety consequences.
+- Operators of vertical agents are often technical, not domain experts. They cannot detect domain failure without help. Domain experts cannot detect technical failure without help. The seam is exactly where the failure lives.
+
+**Mitigations.**
+- **Domain-expert-authored eval set, refreshed quarterly.** Not "can the agent answer general finance questions" but "can the agent navigate the 30 cases this desk's senior PM thinks are tricky this quarter". Without this set, you have no oracle for vertical correctness.
+- **Two-tier review on outputs that touch state.** Anything that executes a trade, alters a treatment plan, or finalises a contract goes through both a technical and a domain reviewer until the system has an audited track record specific to the vertical, not a general one.
+- **Surface implicit knowledge in code, not in retrieval.** If a domain has rules that don't appear cleanly in retrievable docs (microstructure quirks, jurisdiction-specific carve-outs), encode them as deterministic checks the agent must pass before its output ships. Don't rely on the agent to discover them.
+- **Asymmetric loss-aware confidence.** The agent's confidence threshold for taking an action should scale with the loss-on-error of that action, not be a single number. A 90% confident "decline this refund" vs. a 90% confident "execute this trade" should pass different bars.
+- **Domain-expert-in-the-loop until evidence justifies removal.** Default to expert review for vertical deployments. Earn the right to remove it with a long, audited stretch of zero domain-detected errors.
+- **Compositional eval.** Run the *whole* multi-agent stack against an end-to-end vertical scenario, not just per-agent evals. The seam is where the bugs live.
+
+**Detection.**
+- Track domain-expert-flagged corrections per N outputs. A flat or rising curve over time = vertical fit hasn't matured.
+- Track the gap between agent confidence and post-hoc correctness specifically on domain-edge cases (the cases the eval set was written to catch). A stable gap = the system is calibrated; a drifting gap = the world's moved and the agent hasn't.
+- Audit recent regulatory / professional-body output (court rulings, guideline updates, exchange-rule notices). Anything that materially affects the vertical and *isn't* reflected in agent behavior within a defined SLA is a drift alarm.
+
+**Related.**
+- [AP-12 — Agent-to-agent injection](#ap-12--agent-to-agent-injection): same multi-agent topology, attacker-controlled. AP-20 is the benign-actor variant where the system is genuinely trying but the domain wins.
+- [AP-13 — Planner / executor divergence](#ap-13--planner--executor-divergence): AP-13 is intra-run divergence; AP-20 is plan-vs-domain-reality divergence at the system level.
+- [AP-19 — Spec-drift on rigid agent specs](#ap-19--spec-drift-on-rigid-agent-specs): AP-19 happens when the spec ages; AP-20 happens when the *world the spec describes* is one the agent never had a complete map of in the first place.
+
+**References.**
+- "Multi-agent in $vertical" papers and product launches (the `TradingAgents`, `ai-hedge-fund`, `dexter` family on the agentic-finance side; clinical-decision-support work on the medical side; growing legal-drafting tooling) keep surfacing this pattern empirically. Vertical incident writeups, when they emerge, almost always read as some specific instance of the general shape described here.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-19 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
-
-Currently observing (potential future entries):
-- **Multi-agent vertical-domain failure** — multi-agent finance / trading / research stacks (`TradingAgents`, `dexter`, `ai-hedge-fund`) hit failure modes specific to high-stakes verticals that horizontal anti-patterns don't fully cover.
+The original 14-entry roadmap plus AP-15..AP-20 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
