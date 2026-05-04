@@ -86,6 +86,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-16 | [MCP server trust boundary collapse](#ap-16--mcp-server-trust-boundary-collapse) | An installed MCP server ships tool descriptions, resource contents, and sampling prompts that flow straight into the agent's context as if they were first-party instructions |
 | AP-17 | [RAG retrieval poisoning](#ap-17--rag-retrieval-poisoning) | Retrieval-on-demand surfaces attacker-controlled content from a corpus the agent treats as authoritative; the injected content shapes the next answer or tool call |
 | AP-18 | [Autonomy creep](#ap-18--autonomy-creep) | Operational policy grants the agent more tools or higher-impact tools over time without re-review; effective privilege exceeds anything explicitly approved |
+| AP-19 | [Spec-drift on rigid agent specs](#ap-19--spec-drift-on-rigid-agent-specs) | A spec-driven agent encodes the *original* problem; reality moves on, the spec doesn't, and the agent fails confidently against a problem that no longer exists |
 
 ---
 
@@ -725,12 +726,54 @@ Or: the agent is the same, but the *environment* expanded. The original review w
 
 ---
 
+### AP-19 — Spec-drift on rigid agent specs
+
+**TL;DR.** A spec-driven agent stack ("here's the spec, build to it") encodes the *original* problem framing in a static artifact. The world moves on — APIs change, requirements shift, the team's understanding sharpens — and the spec doesn't. The agent keeps producing confident output against a problem that no longer exists.
+
+**Symptom.** The agent's outputs look correct against the written spec but feel wrong to anyone who's been close to the actual system that week. Reviewers can't articulate why a passing-spec output is bad — the spec says "do X under condition Y" and the agent did X under Y. The drift sits between the spec and reality, not between the spec and the output.
+
+**Example.** A spec-driven agent owns API client generation. The spec was written six months ago against v1 of the upstream service. The service has since shipped v2 with a new auth flow and a soft-deprecation notice on v1. The agent keeps regenerating against v1 because the spec still names v1, and continues to "pass" because the v1 endpoints still respond — until the deprecation date hits and a Monday-morning rollout breaks.
+
+Or: a refund-decisioning agent's spec encodes a $X cap. The business raised the cap to $Y two months ago in policy docs but never updated the agent's spec. Customer support keeps escalating refund cases the agent declines because they exceed the stale cap.
+
+Or: a research agent's spec lists a fixed set of acceptable sources. A new domain-of-record (a regulator's site, a primary dataset) appears that everyone in the field now cites. The agent never references it because it isn't in the spec, and produces "complete" reports that look out-of-date to readers.
+
+This is the inverse failure mode of [AP-13](#ap-13--planner--executor-divergence): there, the executor diverges from the plan. Here, the plan is internally consistent — but it's solving last quarter's problem.
+
+**Root cause.**
+- Specs are write-once, agents read-many. Nobody is paid to re-read the spec critically once the agent ships.
+- Spec ownership decays — the original author moves on, the new owner inherits a document they didn't write and don't fully trust to question.
+- "The spec is the source of truth" makes specs look authoritative. Authoritative-looking artifacts get questioned less, not more.
+- Drift indicators (failed real-world matches, increased escalations, stakeholder complaints) live outside the spec system; nothing automatically routes them back.
+- SDD-for-agents tooling encourages spec-first thinking; it does not enforce spec-recurring-review.
+
+**Mitigations.**
+- **Spec expiry dates.** Every section of an agent spec carries a "review by" date. Past that date, the spec is treated as suspect and the agent is paused or warns until re-reviewed. Same shape as cert / dependency expiry.
+- **Versioned reality checks.** Periodically run the agent against a live sample (or a maintained ground-truth set) and flag discrepancies between agent output and current correct answers — independent of whether the spec was followed.
+- **Spec-vs-world drift dashboard.** Monitor: count of cases where spec says X and an authoritative external source (API doc, policy doc, ticketing system) says Y. Rising count = drift.
+- **Inline owner.** Every spec section names a current owner who is responsible for re-reviewing on a cadence. Ownership rotation is itself reviewed.
+- **Empower the executor to flag drift.** When the agent encounters something the spec doesn't cover or contradicts an external source, it should escalate, not paper over. ("I'm being asked to apply a $500 cap; the live policy doc says $750. Spec says $500. Pausing.")
+
+**Detection.**
+- Diff agent decisions against an audit-time independent rerun using the *current* spec inputs (live API docs, live policies). Hits = drift.
+- Track agent escalation/abstention rate. A flat escalation rate combined with rising operator-correction rate suggests the agent has stopped noticing it's wrong.
+- Track the date-distribution of references in agent outputs. If a research agent's citations cluster more than 6 months back over time, its source list is stale.
+
+**Related.**
+- [AP-13 — Planner / executor divergence](#ap-13--planner--executor-divergence): AP-13 is plan-vs-action divergence inside one run; AP-19 is plan-vs-world divergence across time.
+- [AP-15 — Tool-description drift](#ap-15--tool-description-drift): AP-15 is the tool-layer cousin (the tool's described behaviour doesn't match its current behaviour). AP-19 generalises to the entire spec.
+- [AP-08 — Memory poisoning](#ap-08--memory-poisoning): the long-term-store cousin (an agent's memory is wrong because something was written into it). AP-19 is "memory" being correct-as-written but wrong-as-read.
+
+**References.**
+- The general pattern is well-documented in software-engineering literature on stale documentation and contract testing; the agent-specific incarnation is now visible in spec-driven-development tooling (`Fission-AI/OpenSpec` and the broader SDD-for-coding-agents wave) where the spec artifact is structurally privileged in the workflow.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap is complete. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-19 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 Currently observing (potential future entries):
-- **Spec-drift** — agent under-performs when given an excessively rigid or stale spec (inverse of AP-13); in the wild as `Fission-AI/OpenSpec` and similar SDD-for-agents tools surface its failure mode publicly.
 - **Multi-agent vertical-domain failure** — multi-agent finance / trading / research stacks (`TradingAgents`, `dexter`, `ai-hedge-fund`) hit failure modes specific to high-stakes verticals that horizontal anti-patterns don't fully cover.
 
 ---
