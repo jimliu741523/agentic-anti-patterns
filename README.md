@@ -85,8 +85,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-15 | [Tool-description drift](#ap-15--tool-description-drift) | Agent's mental model of a tool (from its prompt description) diverges from the tool's actual current behavior; calls work under old assumptions |
 | AP-16 | [MCP server trust boundary collapse](#ap-16--mcp-server-trust-boundary-collapse) | An installed MCP server ships tool descriptions, resource contents, and sampling prompts that flow straight into the agent's context as if they were first-party instructions |
 | AP-17 | [RAG retrieval poisoning](#ap-17--rag-retrieval-poisoning) | Retrieval-on-demand surfaces attacker-controlled content from a corpus the agent treats as authoritative; the injected content shapes the next answer or tool call |
-
-Planned (PRs welcome — see [Roadmap](#roadmap)): autonomy creep.
+| AP-18 | [Autonomy creep](#ap-18--autonomy-creep) | Operational policy grants the agent more tools or higher-impact tools over time without re-review; effective privilege exceeds anything explicitly approved |
 
 ---
 
@@ -682,11 +681,57 @@ Or: the corpus is fine, but a *citation* in a retrieved document points to an at
 
 ---
 
+### AP-18 — Autonomy creep
+
+**TL;DR.** An agent's operational policy expands incrementally — a new tool here, a wider scope there, a removed confirmation step somewhere else — and the *effective* privilege at month six exceeds anything that would have been approved by the original review at month one. There is no single moment of escalation; the trajectory is what's wrong.
+
+**Symptom.** No incident, no failed audit. The agent simply does more than its description implies. Any one change reads as reasonable in isolation. Stack them up across two quarters and the agent now writes to production databases, calls paid third-party APIs without rate caps, ships code without human review on a class of "trivial" changes that has quietly broadened, or operates against systems that weren't in the original threat model.
+
+**Example.** An internal coding agent ships in February with read-only repo access. March: a developer adds a `format_file` write tool ("safe — formatter is deterministic"). April: `auto_commit_format` for trivial PRs. May: `auto_merge` if CI green and no review comment within 24h. June: `auto_rebase_main` to keep the queue moving. By July the agent merges and rebases unattended PRs against `main`. Nobody re-asked the original "should an agent have write access to main?" question after the first `format_file` decision.
+
+Or: a customer-support agent starts with `read_ticket` and `propose_reply`. Over time it gains `update_ticket_status`, then `apply_refund_under_$X`, then `apply_refund_under_$Y` (Y > X), then `escalate_to_paid_human_specialist` (which spends money). Each step is justified by individual ROI; the cumulative authority — pay money, change customer state, dispatch humans — was never reviewed as one package.
+
+Or: the agent is the same, but the *environment* expanded. The original review was for repo X; new repos B, C, D got added to its scope by config change as the team grew, with no fresh review. Same agent code, very different blast radius.
+
+**Root cause.**
+- Reviews happen at *change* time. Privilege baseline drifts continuously, but no reviewer is paid to re-evaluate the cumulative state.
+- Each individual increment compares to the *previous* state, not the original baseline. The frame of reference moves with the agent.
+- Reasoning about "is this safe given everything the agent already does" requires holding the whole tool set in your head; reasoning about a single new tool is local and feels safer than it is.
+- Confirmation prompts get removed when they're "noisy" — a measure that signals broad authority is being exercised without friction. The friction was the safety mechanism.
+- Owners change. The person who wrote the original threat model is rarely the one approving the 8th tool.
+
+**Mitigations.**
+- **Periodic full-scope re-review.** Quarterly (or per-N-tool-changes), an agent's *current* total tool set, scope, and confirmation policy is reviewed against the *original* baseline by someone with veto authority — not against the most recent state. Frame: "if a fresh hire saw this agent today, would they approve it from scratch?"
+- **Privilege budget per agent.** Assign each agent a "blast radius" score derived from its tools (read = 1, write = 5, write-to-prod = 25, money-spending = 50, ...). Each tool addition spends from a fixed budget. Once the budget is exhausted, no tool may be added without an explicit budget increase.
+- **Confirmation-removal requires its own review.** Removing a "are you sure?" gate is a privilege expansion equivalent to adding a tool. Treat it as one.
+- **Document the original threat model.** Keep a `THREAT_MODEL.md` next to the agent describing what was *originally* in/out of scope. New tools must be checked against it explicitly. Drift becomes visible.
+- **Scope-change diff in the agent's own startup.** On every deploy, log a diff of `(tools, scopes, confirmation_policy)` vs. the prior deploy. Operators see the cumulative shape of the agent over time, not just the latest delta.
+- **Sunset clause on tools.** Each tool addition carries an expiry date. If not re-justified by then, it is removed. Forces the conversation that drift normally avoids.
+
+**Detection.**
+- Trend-line of agent's `(tool_count, write_tool_count, confirmation_step_count)` over time. Monotonic creep on the first two and decline on the third is the shape.
+- Audit money / state-changing tool calls per week. A growing curve with no proportional incident-rate signal usually means scope grew, not that the agent got more careful.
+- Compare the agent's current toolset to its original PR-merging description. The diff is the size of the unreviewed expansion.
+- Survey the team: "describe what this agent can do today." If junior team members' descriptions don't match what the senior on-call says it can do, the actual privilege is undocumented and almost certainly excessive.
+
+**Related.**
+- [AP-04 — Destructive action without confirmation](#ap-04--destructive-action-without-confirmation): autonomy creep is the slow process by which AP-04 becomes available — the confirmation that would have stopped it was quietly removed three steps back.
+- [AP-09 — Tool-selection lock-in](#ap-09--tool-selection-lock-in): an agent with too many tools tends to default to the highest-leverage one; AP-18 is the supply-side cause of AP-09's demand-side symptom.
+- [AP-13 — Planner / executor divergence](#ap-13--planner--executor-divergence): an agent operating well outside its review baseline will produce plans whose downstream actions diverge from any sensible expectation, because the plan space silently grew.
+- [`self-evolving-agent`](https://github.com/jimliu741523/self-evolving-agent) — the [`POLICY.md`](https://github.com/jimliu741523/self-evolving-agent/blob/main/POLICY.md) three-tier scheme is a worked example of how to *document* the privilege baseline and require explicit re-review for promotions, exactly to avoid this anti-pattern.
+
+**References.**
+- The trajectory is the same shape as classic privilege-escalation in IAM systems; literature on "least privilege" and "permission creep" applies directly. Maintainers of long-lived agentic systems independently rediscover this category every few quarters.
+
+---
+
 ## Roadmap
 
-Coming (contributions welcome):
+The original 14-entry roadmap is complete. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
-- **AP-18 Autonomy creep** — operational policy grants the agent more tools or higher-impact tools over time without re-review, until its effective privilege level exceeds anything explicitly approved
+Currently observing (potential future entries):
+- **Spec-drift** — agent under-performs when given an excessively rigid or stale spec (inverse of AP-13); in the wild as `Fission-AI/OpenSpec` and similar SDD-for-agents tools surface its failure mode publicly.
+- **Multi-agent vertical-domain failure** — multi-agent finance / trading / research stacks (`TradingAgents`, `dexter`, `ai-hedge-fund`) hit failure modes specific to high-stakes verticals that horizontal anti-patterns don't fully cover.
 
 ---
 
