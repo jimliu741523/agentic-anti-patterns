@@ -2,6 +2,9 @@
 
 Newest on top. Each entry corresponds to a meaningful catalog change — new entry, structural reorganization, or scope shift. Cosmetic edits are not logged.
 
+## 2026-05-07
+- **AP-21 Long-horizon agent state collapse** added — driven by `bytedance/deer-flow` (65k★) and `cocoindex` ("incremental engine for long-horizon agents") trending. Lossy compression accumulates into corruption over hour/day timescales; mitigation menu emphasises provenance-tagged rollups, checkpoint/rollback as first-class operations, and liveness-vs-progress dashboards.
+
 ## 2026-05-04
 - **AP-18 Autonomy creep** added — closes the original 14-entry roadmap (the trajectory-not-event failure mode where agent privilege drifts upward over months).
 - **AP-19 Spec-drift on rigid agent specs** added — driven by spec-driven-development tooling (`Fission-AI/OpenSpec`) making the failure visible.

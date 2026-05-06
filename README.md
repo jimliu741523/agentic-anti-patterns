@@ -71,7 +71,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs)
 - **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure)
 - **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning)
-- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure)
+- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse)
 
 | # | Anti-pattern | One-line |
 |---|---|---|
@@ -95,6 +95,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-18 | [Autonomy creep](#ap-18--autonomy-creep) | Operational policy grants the agent more tools or higher-impact tools over time without re-review; effective privilege exceeds anything explicitly approved |
 | AP-19 | [Spec-drift on rigid agent specs](#ap-19--spec-drift-on-rigid-agent-specs) | A spec-driven agent encodes the *original* problem; reality moves on, the spec doesn't, and the agent fails confidently against a problem that no longer exists |
 | AP-20 | [Multi-agent vertical-domain failure](#ap-20--multi-agent-vertical-domain-failure) | Multi-agent stacks deployed to high-stakes verticals (finance, medical, legal) fail in domain-specific ways that horizontal anti-patterns don't predict — and the consequences are larger than horizontal use cases |
+| AP-21 | [Long-horizon agent state collapse](#ap-21--long-horizon-agent-state-collapse) | Agents intended to run for hours or days accumulate state — memory, plan, partial outputs, tool history — that becomes inconsistent, redundant, or contradictory; recovery costs grow super-linearly while the agent appears to "still be working" |
 
 ---
 
@@ -854,9 +855,55 @@ If a PR doesn't change the agent's authority or its inputs, no anti-pattern revi
 
 ---
 
+### AP-21 — Long-horizon agent state collapse
+
+**TL;DR.** An agent built to run for hours or days — a "long-horizon" research / coding / ops agent with sandboxes, memory, tools, and subagents — accumulates internal state (rolling memory, evolving plan, partial outputs, tool history, subagent transcripts) that drifts into inconsistency over time. The agent looks alive — it's still emitting tool calls and tokens — but its state space has decohered, and the cost to *recover* from a bad branch grows faster than the cost to *continue down it*.
+
+**Symptom.** Hour-1 outputs look excellent. Hour-6 outputs look slightly off but plausible. Hour-24 outputs reference plan steps the agent doesn't have anymore, summarise tool results that contradict prior summaries, propose actions whose preconditions were invalidated three rollups ago, or quietly retry the same subtask under different framings. Throughput is steady; correctness is not. The agent does not raise its own alarm because, from inside its compressed state, everything is internally consistent.
+
+**Example.** A long-horizon coding agent works on a multi-day refactor. Each day's session begins by reading a rolled-up summary of the prior day's "what I changed and why". By day 4, the rollup of rollups has dropped a key constraint (the legacy interface must stay backwards-compatible for module Z) — that fact survived day 1's summary but was paraphrased away in day 2's. Day 4's PR breaks Z and the agent doesn't know why review is unhappy, because *its own memory says it didn't change Z*.
+
+Or: a research agent runs for 48 hours scraping, summarising, and synthesising. Each scraped page is summarised into rolling memory; conflicting facts from successive scrapes get merged with no provenance kept. By the end the agent's "synthesis" cites X as both a primary source (true, page 7) and as a counterexample (false, was a different X from page 31, merged by similarity). The final report reads coherent and is wrong about a load-bearing claim.
+
+Or: an autonomous ops agent debugs a flaky service overnight. It tries hypotheses A, B, C across hours; rejects A correctly; later, after a rollup, retries A under a slightly different query phrasing because the memory entry for "A was rejected" has been compressed into "investigated A" without the *outcome*. The agent isn't looping — it's not re-using the same tool call — but it's re-doing the work, on a slow drift, indefinitely.
+
+**Root cause.**
+- Long-horizon agents necessarily compress: contexts cap, summaries cascade, memory rolls up. Each compression is lossy. Lossy compression is acceptable for a one-shot answer; it accumulates over hours into corruption.
+- Subagents and tool histories increase the surface area of compression. A subagent's transcript is summarised, then the summary is rolled up, then the rollup is rolled up. By the third level, what reaches the planner is a paraphrase of a paraphrase.
+- Provenance is rarely preserved through rollups. Once a fact loses its source, contradictions cannot be adjudicated; the planner can only follow whichever phrasing currently dominates the memory.
+- "The agent is still working" is not the same as "the agent is still correct". Liveness ≠ progress. Most long-horizon agent-monitoring dashboards measure liveness.
+- Recovery from a corrupted state mid-run is expensive: rolling back the memory means losing real progress; continuing means compounding the error. The agent has no native primitive for "discard everything since checkpoint K and restart from there".
+
+**Mitigations.**
+- **Provenance-tagged memory across rollups.** Every fact that survives a rollup carries a citation — to the tool call, scraped URL, subagent transcript, or earlier memory entry that produced it. Contradictions become inspectable.
+- **Checkpoint + rollback.** Snapshot the agent's full state (memory, plan, open tool calls) on a regular cadence. Make rollback to the *previous* checkpoint a first-class operation the planner can choose. Without rollback, "compounding the error" is the only path forward.
+- **Outcome-preserving compression.** When a hypothesis or sub-task is rolled up, *what happened to it* must survive — not just the fact that it was attempted. "Hypothesis A: rejected because X failed" is a different memory entry from "investigated A".
+- **Diff-against-original-spec gate.** Periodically (every N hours), reload the *original* task spec and diff what the agent's current state implies it's solving against what was originally asked. Drift > threshold pauses for human review.
+- **Subagent transcripts as cited artifacts, not summaries.** A subagent's output is stored verbatim in addressable memory; the planner gets a summary *plus* the transcript ID, and can re-read the transcript on demand. Avoids paraphrase-of-a-paraphrase.
+- **Liveness ≠ progress dashboards.** Track "fraction of recent tool calls that match the original task spec" or "rate of contradictions detected in memory" — not just tokens-per-hour. A high-token-rate agent producing internally inconsistent outputs is a fire alarm, not a healthy run.
+
+**Detection.**
+- Periodic diff: snapshot the agent's *plan / memory / open subtasks* at hour N and hour N+6. A growing-but-coherent state is fine; a state that contradicts itself across the diff is the failure mode.
+- Run a rebuttal pass: at hour N, ask the agent to argue *against* its own current top conclusion using only the same memory. Sharp deterioration in coherence between affirmation and rebuttal indicates the memory has decohered.
+- Probe with a known-answer canary: inject a fact at hour 1 ("the lead engineer is Alice"), check if it survives intact at hour 24. Loss = compression is dropping facts you cannot afford to drop.
+- Compare token cost vs. real progress on a deterministic milestone schedule (e.g. "passes test X by hour 6, test Y by hour 12"). Steady token spend without milestone progress is the smoke alarm.
+
+**Related.**
+- [AP-05 — Context bloat → cost explosion](#ap-05--context-bloat--cost-explosion): AP-05 is what happens *before* you compress; AP-21 is what happens *after*. Every long-horizon agent must trade between the two.
+- [AP-06 — Semantic goal drift on long chains](#ap-06--semantic-goal-drift-on-long-chains): AP-06 is the goal vector drifting; AP-21 is the *state representation* drifting underneath a stable goal. Often co-occur.
+- [AP-08 — Memory poisoning](#ap-08--memory-poisoning) and [AP-17 — RAG retrieval poisoning](#ap-17--rag-retrieval-poisoning): the *adversarial* causes of inconsistent memory; AP-21 is the *non-adversarial* version where compression itself is the corrupting agent.
+- [AP-13 — Planner / executor divergence](#ap-13--planner--executor-divergence): one specific shape of state collapse — the plan and the executor read different views of the same memory.
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) — `hierarchical_summary` is the architectural family most exposed to AP-21; the bench's recall-at-turn-50 metric is a one-shot proxy for the longer drift problem.
+
+**References.**
+- The pattern is observable in production long-running coding and research agents (the recent wave of "long-horizon SuperAgent" and "incremental engine for long-horizon agents" framings — `bytedance/deer-flow`, `cocoindex`, multi-day variants of `dexter`/`ai-hedge-fund`-style stacks). Public postmortems are scarce because the failure mode is gradual and rarely produces a single "incident" — it produces a slowly worsening stream of subtly-wrong outputs.
+- Classical operating-systems literature on checkpoint/restart and provenance-tracking (e.g. Lampson's *Hints for Computer System Design*) applies almost line-for-line to long-horizon agents; the agentic incarnation is the same idea with a lossy summariser in the middle.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-20 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-21 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
