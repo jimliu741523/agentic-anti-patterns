@@ -70,7 +70,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - **Input / ingress** — [AP-01](#ap-01--prompt-injection-via-tool-output) · [AP-15](#ap-15--tool-description-drift) · [AP-16](#ap-16--mcp-server-trust-boundary-collapse) · [AP-17](#ap-17--rag-retrieval-poisoning)
 - **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs)
 - **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure)
-- **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning)
+- **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output)
 - **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse)
 
 | # | Anti-pattern | One-line |
@@ -96,6 +96,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-19 | [Spec-drift on rigid agent specs](#ap-19--spec-drift-on-rigid-agent-specs) | A spec-driven agent encodes the *original* problem; reality moves on, the spec doesn't, and the agent fails confidently against a problem that no longer exists |
 | AP-20 | [Multi-agent vertical-domain failure](#ap-20--multi-agent-vertical-domain-failure) | Multi-agent stacks deployed to high-stakes verticals (finance, medical, legal) fail in domain-specific ways that horizontal anti-patterns don't predict — and the consequences are larger than horizontal use cases |
 | AP-21 | [Long-horizon agent state collapse](#ap-21--long-horizon-agent-state-collapse) | Agents intended to run for hours or days accumulate state — memory, plan, partial outputs, tool history — that becomes inconsistent, redundant, or contradictory; recovery costs grow super-linearly while the agent appears to "still be working" |
+| AP-22 | [Context pollution from raw tool output](#ap-22--context-pollution-from-raw-tool-output) | Agents pipe unfiltered tool responses verbatim into context; by mid-task, raw output crowds out earlier task constraints, causing the model to reason from recency rather than relevance |
 
 ---
 
@@ -850,6 +851,7 @@ A short checklist for reviewing a PR that adds or changes agent behaviour. Pick 
 **Memory / state**
 - AP-05 / AP-08 — is context bounded? Is provenance tagged on anything written into memory?
 - AP-09 — is the agent reaching for the same tool because it's right or because it's first in the list?
+- AP-22 — are tool outputs filtered or sandboxed before being inserted into context? Is per-turn tool-output token ratio tracked?
 
 If a PR doesn't change the agent's authority or its inputs, no anti-pattern review is needed — feature changes inside the agent's existing privilege band stay routine.
 
@@ -901,9 +903,61 @@ Or: an autonomous ops agent debugs a flaky service overnight. It tries hypothese
 
 ---
 
+### AP-22 — Context pollution from raw tool output
+
+**TL;DR.** Agents pipe full, unfiltered tool responses — complete search result sets, raw API payloads, entire file contents — directly into the shared context window. By mid-task, raw tool output dominates the window, crowding out earlier task constraints, and the model reasons from *recency* rather than *relevance*. The task drifts without a visible failure.
+
+**Symptom.** Final answer closely mirrors the content of the last two or three tool calls but ignores a constraint the user stated at session start. Task cost looks reasonable (context never technically overflows), but correctness degrades as the tool-call chain grows. Developers who add a context-compression layer see immediate improvement — evidence that the pre-compression state was this anti-pattern at rest.
+
+**Example.**
+```
+User: "Fix the authentication bug without breaking the legacy /v1 API."
+
+Turn 1-15: agent calls web_search() 15 times.
+Each result: 2,000-token raw block (titles, URLs, full snippets, metadata).
+Turn 15 context: 30,000 tokens raw search output / 32,000 total.
+
+Agent produces a fix that updates /v1 endpoints — breaking the
+constraint stated at turn 0, which now lies outside effective attention.
+```
+
+Or: a research agent fetches 10 full web pages (5–10 k tokens each). The last two pages discuss a competing approach. The final synthesis heavily weights those approaches — not because they are more relevant, but because they occupy the most recent (and most attended) portion of the context.
+
+Or: a coding agent runs `cat /var/log/syslog` with no range restriction, returning 180 k tokens. This single call fills 70% of a 256 k context limit. All subsequent reasoning draws from the freshest log lines, not from the anomaly the user highlighted at session start.
+
+**Root cause.**
+- Tool call APIs return arbitrarily large payloads; agents accept defaults (no pagination, no size cap, no summarization) because the individual call always "succeeds."
+- Context fullness is invisible from inside the model's reasoning trace. The agent has no signal that its own tool outputs are crowding out earlier instructions.
+- The model's attention is recency-biased: tokens near the end of a long context receive disproportionate weight relative to tokens at the start. A constraint stated at turn 0 competes at a systematic disadvantage against raw output injected at turn 15.
+- System prompts rarely specify per-tool output budgets, so no external force limits payload size.
+
+**Mitigations.**
+- **Per-tool output budget.** In the system prompt: *"If a single tool response exceeds T tokens, summarize it to T tokens before including it in context. Never include a raw tool output larger than T tokens verbatim."* T = 1,000–2,000 is a practical starting point for search-and-read pipelines.
+- **Tool-output sandboxing.** Pass every tool response through a filter step before inserting it into the conversation. The filter keeps the first P tokens (often: titles, headers, result counts), the last Q tokens, and any tokens that contain keywords from the original task specification; discards the middle. This is the architecture of context-window optimization tools that report 90%+ size reductions in coding-agent pipelines.
+- **Pagination by default.** Tools that return lists (search results, log lines, directory listings) must paginate. Agents explicitly request pages rather than receiving the full result set. Return at most N items per call; make N part of the tool's schema, not an optional flag.
+- **Separate working memory from primary context.** Store raw tool outputs in addressable out-of-context memory (vector store, structured episode store); insert only a compact summary into the primary context window. Any later step that needs the full payload fetches it explicitly. See [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) for reference implementations.
+
+**Detection.**
+- Compute `tool_output_tokens / total_context_tokens` per turn. If this ratio exceeds 0.6 by turn 10, unfiltered passthrough is the likely culprit.
+- Sample N completed task sessions; check whether final answers address the user's original constraint or drift toward the content of the last two or three tool calls. A high *recency-drift* rate indicates the pattern.
+- Instrument tool calls to log payload size before they are inserted into context. Alert on any payload exceeding a defined threshold before a mitigation pass is applied.
+
+**Related.**
+- [AP-05 — Context bloat → cost explosion](#ap-05--context-bloat--cost-explosion): AP-05 is the *economic* symptom — token count grows, bill grows. AP-22 is the *quality* symptom — task coherence degrades even when context stays within comfortable size. They share the same root cause (unfiltered accumulation) and often co-occur; AP-22 can manifest before AP-05's cost signal is detectable.
+- [AP-06 — Semantic goal drift on long chains](#ap-06--semantic-goal-drift-on-long-chains): AP-22 is a *mechanical* driver of AP-06. When raw tool output pushes early task framing past the model's effective attention range, goal drift is the natural consequence.
+- [AP-21 — Long-horizon agent state collapse](#ap-21--long-horizon-agent-state-collapse): AP-21 requires multi-hour runs and lossy rollup cascades. AP-22 acts within a single session of 10–20 tool calls and does not require any compaction step — it is the acute form; AP-21 is the chronic form.
+
+**References.**
+- `mksglu/context-mode` (13,606★): "Context window optimization for AI coding agents — sandboxes tool output, 98% reduction across 14 platforms." Represents a production response to this anti-pattern; the measured reduction implies the pre-mitigation baseline is AP-22 at scale.
+- Liu et al., *"Lost in the Middle: How Language Models Use Long Contexts"* (2023) — demonstrates that LLM accuracy on facts placed in the middle of long contexts is substantially lower than facts placed at the start or end; the recency-bias mechanism that makes AP-22 harmful.
+
+**See also.** [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) — the `examples/tool_output_shim.py` example shows how to use summary compression as a tool-output filter layer that reduces per-call context cost while preserving task-relevant signal.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-21 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-22 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
