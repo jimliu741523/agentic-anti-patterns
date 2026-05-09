@@ -71,7 +71,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs)
 - **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure) · [AP-23](#ap-23--tool-call-argument-injection)
 - **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output) · [AP-24](#ap-24--memory-write-path-accumulation)
-- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse)
+- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility)
 
 | # | Anti-pattern | One-line |
 |---|---|---|
@@ -99,6 +99,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-22 | [Context pollution from raw tool output](#ap-22--context-pollution-from-raw-tool-output) | Agents pipe unfiltered tool responses verbatim into context; by mid-task, raw output crowds out earlier task constraints, causing the model to reason from recency rather than relevance |
 | AP-23 | [Tool-call argument injection](#ap-23--tool-call-argument-injection) | Agents that populate tool arguments from retrieved content can be manipulated by embedded directives — causing the agent to pass attacker-controlled values (paths, URLs, credentials, commands) to tools it was never asked to use that way |
 | AP-24 | [Memory write-path accumulation](#ap-24--memory-write-path-accumulation) | Agents commit every observed fact without salience filtering or contradiction checking; long-lived agents accumulate contradictory and stale facts until active-task performance drops to 40–60% |
+| AP-25 | [Tool-schema wire-format incompatibility](#ap-25--tool-schema-wire-format-incompatibility) | Agents transmit tool schemas in standard JSON format to small or local models that cannot parse it — Phi-4 14B achieves 0% tool-call accuracy with JSON and 84.4% with compiled structured text; a streaming-protocol variant silently swallows every intended tool call |
 
 ---
 
@@ -842,6 +843,7 @@ A short checklist for reviewing a PR that adds or changes agent behaviour. Pick 
 **Model behaviour over time**
 - AP-06 — long chains: does the agent's terminal action still serve the original goal?
 - AP-07 — model swap: do existing evals exercise the parser, refusals, and tool-call shape?
+- AP-25 — local/small model deploy: are tool schemas compiled to the target model's optimal format? Is tool-call null rate tracked per model family?
 - AP-10 — does the agent claim to have verified anything? Is the verification a real subprocess or a vibe?
 - AP-19 — is the spec the agent obeys still describing the *current* world?
 
@@ -1147,9 +1149,85 @@ Or: a multi-session assistant records "meeting scheduled for Thursday," then "me
 
 ---
 
+### AP-25 — Tool-schema wire-format incompatibility
+
+**TL;DR.** Agents transmit tool schemas to LLMs in the standard JSON format used by OpenAI Function Calling, Anthropic Tool Use, and MCP — but small and local models (4B–14B params) cannot parse deeply-nested JSON reliably. Phi-4 14B achieves 0% tool-call accuracy with the standard format and 84.4% when schemas are compiled to structured text. A second failure layer — streaming protocol bugs in Ollama and compatible servers — causes every intended tool call to be silently swallowed regardless of schema format. No framework provides a compilation or adaptation layer between tool registry and LLM API call.
+
+**Symptom.** Small or local model deploys call no tools at all, hallucinate argument names, or emit broken JSON for tool invocations — while the same model scores well on general reasoning tasks. The failure surface is invisible in standard CI because tests usually run against GPT-4 or Claude. When a local model is substituted, tool calling silently drops to near-zero with no error signal. Ollama-hosted models hit a compounding failure: the streaming response completes with `finish_reason: stop` and empty content instead of `tool_calls` delta chunks, making every intended tool call invisible to the calling framework.
+
+**Example.**
+```python
+# Same tool, two schema representations sent to Phi-4 14B:
+
+# Standard JSON  →  0% tool-call accuracy (Phi-4 14B, arxiv 2605.04107)
+schema_json = {
+    "name": "search_web",
+    "description": "Search the web for a query",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query":       {"type": "string",  "description": "The search query"},
+            "max_results": {"type": "integer", "default": 5}
+        },
+        "required": ["query"]
+    }
+}
+
+# Compiled structured text  →  84.4% tool-call accuracy (same model, same task)
+schema_text = """
+TOOL: search_web
+  PURPOSE: Search the web for a query
+  PARAMS:
+    query [string, required]: The search query
+    max_results [integer, optional, default=5]: Maximum result count
+"""
+```
+
+Or: a multi-agent system routes orchestrator calls to GPT-4 and executor tasks to a self-hosted Qwen-7B. The executor generates plausible text but never invokes a tool. The orchestrator expects a tool-call result, receives a text response, and either crashes or treats it as a tool output — corrupting the rest of the workflow silently.
+
+Or: a company deploys an agent on-prem via Ollama for cost control. Schemas are well-formed. In streaming mode the model signals a tool call with `finish_reason: stop` and empty content — not the `tool_calls` delta chunks the framework expects. The framework treats every intended tool call as "model finished, no tool needed." The agent completes every task without invoking any tool.
+
+**Root cause.**
+- The OpenAI/Anthropic/MCP JSON schema format was optimized for model families trained on it. Small and self-hosted variants (Phi, Qwen, Llama, Mistral) were often trained on natural-language-adjacent instruction formats and cannot reliably parse deeply-nested JSON Schema semantics.
+- No framework provides a compilation or adaptation layer. The mcp-sdk request for "official adapter functions for LLM providers" (issue #235, 18 reactions) has been open 14 months with no resolution across two major SDK versions.
+- Schema generation pipelines introduce additional bugs upstream: FastMCP's docstring parser incorrectly converts Python docstrings to JSON Schema (issue #226, 16 reactions), producing malformed schemas that cause tool-call failures even on large models — before format incompatibility is ever a factor.
+- Streaming protocol variants (Ollama, llama.cpp server) do not consistently emit `tool_calls` delta chunks. The response terminates cleanly but with no tool call, indistinguishable at the framework layer from "model decided not to use a tool."
+- The failure is invisible in standard CI because CI pipelines default to cloud APIs where format compatibility is not an issue. Local model failures appear only in deployment.
+
+**Mitigations.**
+- **Schema compilation layer.** Before transmitting a tool schema to the LLM API, compile it to the format best suited for the target model family. The TSCG taxonomy (2605.04107) identifies four operator types (boolean, numeric, selection, composite) and maps them to structured text with natural-language cues. Token savings of ~40% vs. raw JSON are a side benefit.
+- **Per-model profile registry.** Maintain an explicit mapping from model family to output format: `{phi, qwen, llama} → structured_text`, `{gpt-4, claude} → compressed_json`, unknown → `structured_text` (safe default). Profile key is model-name-prefix based with an override for custom deployments.
+- **Pre-compilation schema validation.** Validate tool definitions against a strict JSON Schema metaschema before compilation to catch FastMCP #226-class bugs. Catches required-field omissions, type errors, and nested-object structure errors before they reach the LLM.
+- **Streaming protocol normalization.** Detect Ollama-style streaming responses (empty content + `finish_reason: stop` when tool definitions were present) and reissue non-streaming or post-process the delta stream to reconstruct tool-call objects. A thin adapter between the LLM streaming client and the tool-call parser covers both the format and streaming-protocol failure layers.
+- **Local-model CI integration.** Run a tool-call accuracy smoke-test against each supported model family in CI, not just against the primary cloud API. A deterministic schema + expected tool call exercised against a cached small model adds under 5 seconds and catches format regressions before production.
+
+**Detection.**
+- **Cross-model smoke-test.** Define 3–5 tool-call scenarios with deterministic expected outputs. After every schema change, run them against both the primary model and at least one small/local model. Pass rate below 80% on the small model signals format incompatibility.
+- **Tool-call null rate per model.** Track the fraction of LLM responses that include a tool call, broken out by model. A sudden drop in tool-call rate — with no change in prompts or task distribution — indicates a schema format or streaming protocol regression.
+- **Schema validation gate in the tool registry.** Before registering any tool schema, validate it against a strict metaschema. Log validation failures as schema-health metrics; a growing failure count indicates upstream docstring-parser drift (FastMCP #226 class).
+- **Streaming-response audit.** Log `finish_reason` and `tool_calls` presence for every streaming response. Alert when `finish_reason: stop` co-occurs with a non-empty prompt that includes tool definitions — this is the Ollama streaming bug fingerprint.
+
+**Related.**
+- [AP-03 — Hallucinated tool calls](#ap-03--hallucinated-tool-calls): AP-03 is the model inventing tool names that don't exist. AP-25 is the schema format preventing the model from correctly calling tools that do exist. Both produce zero-tool-call outcomes; root cause differs.
+- [AP-07 — Silent regression on model swap](#ap-07--silent-regression-on-model-swap): AP-07 covers behavioral drift when swapping model versions within the same family. AP-25 is the specific failure when crossing model families (cloud GPT-4 → local Phi-4). The CI-invisibility mechanism is identical.
+- [AP-09 — Tool-selection lock-in](#ap-09--tool-selection-lock-in): AP-09 describes an agent choosing the same tool repeatedly. AP-25 describes an agent calling no tools at all — the more severe outcome on the same axis.
+- [AP-15 — Tool-description drift](#ap-15--tool-description-drift): AP-15 concerns semantic drift in tool descriptions (description no longer matches what the tool does). AP-25 concerns format incompatibility in tool schemas (format no longer matches what the model can parse). Both produce incorrect tool calls via different mechanisms.
+
+**References.**
+- arxiv 2605.04107 "TSCG: Deterministic Tool-Schema Compilation for Agentic LLM Deployments" (May 2026) — **Phi-4 14B: 0% → 84.4% tool-call accuracy** by switching from JSON schema to structured text; per-model profile tuning required; research prototype, no published package.
+- GitHub `modelcontextprotocol/python-sdk#235` (18 rxn, March 2025, **unresolved after 14 months**): "Official adapter functions for LLM providers in MCP Python SDK" — practitioners explicitly requesting a schema format adaptation layer between MCP schema and LLM API call.
+- GitHub `modelcontextprotocol/python-sdk#226` (16 rxn): "Function docstring not properly converted to tool JSON schema in FastMCP" — auto-generated schemas cause tool-call failures even for large models; confirms schema-generation bugs as an upstream failure layer.
+- GitHub `crewAIInc/crewAI#5472` (open 2026): "`output_pydantic`/`response_model` leaks into tool-calling loop, causing tools to be skipped on non-OpenAI LLMs" — structural pydantic/JSON schema incompatibility on non-OpenAI model families.
+- GitHub `bytedance/deer-flow#186`: "Qwen/vLLM tool call returns `tool_call_id` as None, crashes `create_react_agent`" — local model schema mismatch causes full agent crash.
+- Practitioner benchmark (jdhodges.com, 2026): tested 13 local LLMs on tool calling; "models under 7B parameters exhibit low or zero tool invocation rates, confabulated responses in place of tool use, and catastrophic failure on multi-step tool chains."
+- Ollama streaming bug (betterclaw.io, 2026): "Ollama doesn't properly emit `tool_calls` delta chunks — when a local model decides to call a tool, the streaming response returns empty content with `finish_reason: stop`." Confirms the streaming-protocol failure layer operates independently of schema format.
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/tool_schema_compiler.py` (Pattern 14) — composable schema compiler: 3 output formats (`compressed_json`, `structured_text`, `markdown_table`), 4 TSCG operator types, model profile registry (`phi`/`qwen`/`llama` → `structured_text`; `gpt-4`/`claude` → `compressed_json`), pre-compilation JSON Schema validation, `compile_all()` preamble builder. MIT license; stdlib only.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-24 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-25 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
