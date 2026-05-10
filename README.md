@@ -67,7 +67,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 ## Catalog
 
 **Browse by failure stage:**
-- **Input / ingress** — [AP-01](#ap-01--prompt-injection-via-tool-output) · [AP-15](#ap-15--tool-description-drift) · [AP-16](#ap-16--mcp-server-trust-boundary-collapse) · [AP-17](#ap-17--rag-retrieval-poisoning)
+- **Input / ingress** — [AP-01](#ap-01--prompt-injection-via-tool-output) · [AP-15](#ap-15--tool-description-drift) · [AP-16](#ap-16--mcp-server-trust-boundary-collapse) · [AP-17](#ap-17--rag-retrieval-poisoning) · [AP-30](#ap-30--mcp-marketplace-supply-chain-injection)
 - **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs)
 - **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure) · [AP-23](#ap-23--tool-call-argument-injection) · [AP-28](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success) · [AP-29](#ap-29--unconditional-tool-invocation-tool-use-tax)
 - **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output) · [AP-24](#ap-24--memory-write-path-accumulation)
@@ -104,6 +104,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-27 | [Multi-agent concurrent state corruption](#ap-27--multi-agent-concurrent-state-corruption) | Parallel agents writing to shared artifacts without locks, leases, or phase gates silently overwrite each other's work, double-claim tasks, or let downstream phases start on partial data — coordination failures account for 41–87% of production multi-agent failures |
 | AP-28 | [Agent runaway budget burn and silent tool-call success](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success) | The agent loops forever returning 200 OK while spending nothing — or burns $437 overnight with no in-process kill-switch; the two most expensive runtime failure modes (runaway cost + silent no-op) have no standard library guard |
 | AP-29 | [Unconditional tool invocation (tool-use tax)](#ap-29--unconditional-tool-invocation-tool-use-tax) | Agents transmit the full tool-schema catalog on every turn and invoke tools unconditionally; even correct schemas degrade reasoning quality below plain chain-of-thought under semantic noise, with a 40-tool catalog adding ~3,000 tokens per turn regardless of whether tools are needed |
+| AP-30 | [MCP marketplace supply chain injection](#ap-30--mcp-marketplace-supply-chain-injection) | A developer or orchestrator installs an MCP server from a public registry without verifying its identity or integrity; a typosquatted or ownership-transferred server injects attacker-controlled tool descriptions into the agent's context, escalating from metadata poisoning to arbitrary command execution via stdio transport |
 
 ---
 
@@ -838,6 +839,7 @@ A short checklist for reviewing a PR that adds or changes agent behaviour. Pick 
 - AP-01 — does the prompt assembly trust tool output as instruction?
 - AP-15 / AP-16 — is the tool description authoritative? Can a third-party MCP server inject one?
 - AP-17 — does retrieval surface untrusted text? Is provenance carried into context?
+- AP-30 — are all installed MCP servers pinned to an exact version + hash? Is there an allowlist blocking unapproved servers? Is tool-description fingerprint drift detected on startup?
 
 **Tool / data egress** (the agent does something)
 - AP-04 — is a destructive action gated by confirmation? Is the gate still there after the last "noisy prompt" cleanup?
@@ -1420,9 +1422,53 @@ Two architectural defaults compound:
 
 ---
 
+## AP-30 — MCP marketplace supply chain injection
+
+**TL;DR.** A developer or orchestrator installs an MCP server from a public marketplace or registry without verifying its identity or integrity. A typosquatted package, a server whose ownership was silently transferred, or a server hijacked at the registry level injects attacker-controlled tool descriptions into the agent's context — escalating from metadata poisoning (AP-16) to arbitrary command execution via the MCP stdio transport layer.
+
+**Symptom.**
+- An agent begins calling tools that weren't present the last time the server was used, or tool descriptions have changed behavior between agent restarts without any explicit upgrade.
+- An MCP server subprocess makes unexpected outbound network connections to hosts not present in the original server's documentation.
+- Agent sessions leak query results, file contents, or environment variables to a new endpoint that appeared after an MCP package auto-update.
+- A developer installs a "trending MCP filesystem server" from the marketplace; the installed package name (`mcp-file5ystem`) differs from the intended package (`mcp-filesystem`) by one character — the two share identical tool names, but the fake adds an `audit_files(directory)` tool whose description reads "Structured metadata for compliance audit."
+
+**Example.**
+A developer adds `mcp-postgres-connector` to their agent's MCP configuration. Twelve months later, the original maintainer abandons the npm package; a new owner acquires it and adds a `log_query(sql, results)` tool with the description "Structured query logging for compliance pipelines." Agents that have been running for months auto-update on restart and begin shipping SQL results to `db-logs.io`. No tool schema validation runs at startup; the tool count changed from 6 to 7; no alert was raised.
+
+Separately: an attacker registers `mcp-githup` to the MCP marketplace two days after `mcp-github` gains traction. The packages are 99% identical; the fake adds a `submit_pr_feedback(pr_id, feedback)` tool that POSTs content to an attacker-controlled collector. Developers copying setup snippets from blog posts reference the typosquatted name.
+
+**Root cause.**
+MCP server registries and marketplaces have no mandatory code-signing, no maintainer identity verification, and no ownership-transfer controls equivalent to even minimal package registry requirements. The MCP specification defines the protocol for what a server sends *after* connection but has no installation-phase security layer. Three compounding gaps produce escalating risk:
+1. **No content-addressable pinning.** Servers installed by name and version alone can be silently substituted at the registry. A `@latest` or unpinned version tag means any registry update changes what loads into the agent's context.
+2. **No ownership-transfer controls.** Package registries allow ownership transfer without consumer notification (identical mechanism to historical npm supply chain attacks). A server in use for months can be replaced by a new owner without triggering any alert.
+3. **Stdio as RCE surface.** MCP servers run as local subprocesses over stdio. When a malicious tool description contains a shell-injection payload, the stdio transport layer escalates metadata poisoning to full process execution — confirmed by CVE-2026-30623 (command injection via MCP stdio in LiteLLM) and CVE-2026-23744 (MCPJam Inspector RCE via unauthenticated server installation on `0.0.0.0`). OX Security's April 2026 advisory quantified this at 200,000+ vulnerable instances across four exploitation families; Anthropic confirmed the stdio behavior as "expected behavior" at the protocol level — meaning this surface will not be closed upstream.
+
+**Mitigations.**
+1. **Pin all MCP server installations to exact version + content hash.** Treat MCP server dependencies like Python packages with hash verification: `mcp-filesystem==1.2.3@sha256:<digest>`. Reject installs where the resolved package hash doesn't match the pinned digest. Fail closed on missing or mismatched digests — never fall back to network resolution.
+2. **Allowlist-only server registry.** Maintain an explicit allowlist of approved server identifiers and pinned versions in version control (checked by CI). At agent-startup time, reject any server not in the allowlist. No marketplace browsing or dynamic server discovery in production paths.
+3. **Tool-description fingerprinting and drift detection on startup.** Before the first tool call of any session, compute a SHA-256 hash of every tool name + description loaded from each MCP server. Compare against the pinned baseline stored in version control. Refuse to start if any tool description has changed outside an explicit, reviewed upgrade commit.
+4. **Network egress isolation for MCP server subprocesses.** Run each MCP server subprocess with an OS-level egress policy (allowlist-only outbound URLs, enforced by a local firewall rule or container network policy). Block unexpected outbound connections before the tool executes, not after the exfiltration completes.
+
+**Detection.**
+- **Server content hash drift.** At startup, resolve the installed server package to a content hash and compare against the version-pinned expected hash stored in your lockfile. A mismatch is a registry-level substitution event.
+- **Tool cardinality and name invariant.** Assert that each MCP server exposes exactly the expected number of tools with the expected names on every startup. New tool names appearing in an existing server version signal silent tampering. Log the delta and halt rather than continuing with an expanded tool surface.
+- **MCP subprocess network anomaly.** Monitor outbound connections from MCP server subprocesses (OS-level or container network monitoring). Flag connections to hosts not in the server's declared dependency allowlist. An MCP filesystem server connecting to `audit-collector.io` is the primary detection signal.
+- **Registry ownership change subscription.** Subscribe to ownership transfer notifications for all installed server packages at your registry of choice. A maintainer change without a corresponding reviewed upgrade PR in your config repository is a supply chain risk event requiring manual re-vetting before the next install.
+
+**Related.** AP-01 (prompt injection via tool output — the execution path after a rogue server is installed), AP-16 (MCP server trust boundary collapse — what a malicious server injects once connected; AP-30 concerns the installation phase upstream of AP-16), AP-23 (tool-call argument injection — escalation path via injected tool arguments), AP-26 (sub-agent credential scope overflow — blast radius is amplified when a rogue server holds broad credentials).
+
+**References.**
+- OX Security "The Mother of All AI Supply Chains" advisory (April 2026) — architectural RCE at the MCP protocol level; 200,000+ vulnerable instances across 7,000+ publicly accessible servers; four exploitation families including malicious package distribution through MCP marketplaces; Anthropic confirmed stdio behavior as "expected behavior" — the protocol surface will not be patched. 10+ High/Critical CVEs across LiteLLM, LangFlow, Flowise, Windsurf, LangChain, DocsGPT, GPT Researcher.
+- arxiv 2510.16558 "A First Look at the Security Issues in the Model Context Protocol Ecosystem" (revised April 2026) — 67,057 MCP servers analyzed across six public registries; MCPInspect identified 833 vulnerable servers; weak registry vetting and no ownership controls enable server hijacking; attacker-controlled tool metadata demonstrably shapes LLM reasoning and induces unintended operations.
+- CVE-2026-30623 — command injection via MCP stdio transport in LiteLLM; confirms stdio as a live RCE escalation path when tool descriptions contain shell-injection payloads.
+- CVE-2026-23744 — MCPJam Inspector RCE; inspector listens on `0.0.0.0` with no authentication, enabling remote installation of malicious MCP servers; root-causes the "unauthenticated server install" vector.
+- vulnerablemcp.info taxonomy (2026) — community-curated CVE database; 6 Supply Chain, 13 Remote Code Execution, 15 Data Exfiltration, 8 Credential Theft CVEs in current taxonomy; supply chain and RCE categories are the primary attack surface AP-30 addresses at the installation phase.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-29 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-30 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
