@@ -69,7 +69,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 **Browse by failure stage:**
 - **Input / ingress** — [AP-01](#ap-01--prompt-injection-via-tool-output) · [AP-15](#ap-15--tool-description-drift) · [AP-16](#ap-16--mcp-server-trust-boundary-collapse) · [AP-17](#ap-17--rag-retrieval-poisoning)
 - **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs)
-- **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure) · [AP-23](#ap-23--tool-call-argument-injection)
+- **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure) · [AP-23](#ap-23--tool-call-argument-injection) · [AP-28](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success)
 - **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output) · [AP-24](#ap-24--memory-write-path-accumulation)
 - **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility) · [AP-26](#ap-26--sub-agent-credential-scope-overflow) · [AP-27](#ap-27--multi-agent-concurrent-state-corruption)
 
@@ -102,6 +102,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-25 | [Tool-schema wire-format incompatibility](#ap-25--tool-schema-wire-format-incompatibility) | Agents transmit tool schemas in standard JSON format to small or local models that cannot parse it — Phi-4 14B achieves 0% tool-call accuracy with JSON and 84.4% with compiled structured text; a streaming-protocol variant silently swallows every intended tool call |
 | AP-26 | [Sub-agent credential scope overflow](#ap-26--sub-agent-credential-scope-overflow) | Orchestrators forward static, long-lived, fully-scoped tokens to sub-agents; when one sub-agent is compromised or misbehaves, the credential's blast radius reaches every resource it can touch — with no delegation log and no revocation path |
 | AP-27 | [Multi-agent concurrent state corruption](#ap-27--multi-agent-concurrent-state-corruption) | Parallel agents writing to shared artifacts without locks, leases, or phase gates silently overwrite each other's work, double-claim tasks, or let downstream phases start on partial data — coordination failures account for 41–87% of production multi-agent failures |
+| AP-28 | [Agent runaway budget burn and silent tool-call success](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success) | The agent loops forever returning 200 OK while spending nothing — or burns $437 overnight with no in-process kill-switch; the two most expensive runtime failure modes (runaway cost + silent no-op) have no standard library guard |
 
 ---
 
@@ -841,6 +842,7 @@ A short checklist for reviewing a PR that adds or changes agent behaviour. Pick 
 - AP-04 — is a destructive action gated by confirmation? Is the gate still there after the last "noisy prompt" cleanup?
 - AP-11 — does the agent fetch URLs derived from data it didn't author?
 - AP-18 — has the tool list grown since the last review without a fresh re-baseline?
+- AP-28 — is there an in-process cost ceiling with a hard kill-switch? Does a no-progress detector fire before the next tool call (not just at max_iterations)? Are 200 OK responses validated for semantic progress, not just HTTP status?
 
 **Model behaviour over time**
 - AP-06 — long chains: does the agent's terminal action still serve the original goal?
@@ -1330,9 +1332,55 @@ No `FileLock` around shared writes; task queues with no atomic `claim()` / `rele
 
 ---
 
+## AP-28 — Agent runaway budget burn and silent tool-call success
+
+**TL;DR.** The agent spends all night calling tools that return `200 OK` while making zero semantic progress — or loops until terminated, burning **$437 in one overnight run**, **$3,200 across 68 weekend loop failures**, or making **847 API calls for a single weather query**. The two failures share a root cause: the only in-process guard most frameworks provide is `max_iterations`, which measures *steps*, not *cost* and not *progress*.
+
+**Symptom.**
+- Agent loops indefinitely, returning identical or near-identical tool results each turn; no external monitor fires because the HTTP status is always 200.
+- A session that should have cost $0.80 appears on the billing dashboard at $437 (or $3,200); no alert was sent during the run.
+- Tool calls are structurally valid JSON but argument values are wrong type, out of range, or missing required fields — the framework silently coerces or drops them, the tool returns success, and the agent reports completion on a no-op.
+- Agent performance declines gradually over a multi-step task as structural constraints accumulate; simple loop-count guards never trip because the agent is still making forward progress by step count even as output quality collapses.
+
+**Example.**
+An agent is tasked with finding the current weather in Tokyo. It issues a tool call, gets a cached stale response (200 OK), issues the same call again to "refresh", gets the same response, resolves to summarise its own summary, then calls the tool again. No tool call fails. After 847 calls and ~90 minutes, a human terminates it manually. The agent's final message: "I've completed a thorough weather analysis."
+
+**Root cause.**
+Three compounding gaps:
+1. **No semantic progress detector.** `max_iterations` counts steps, not whether the outputs are changing or the task is advancing. An agent can loop inside the budget limit indefinitely while appearing active.
+2. **No in-process cost ceiling.** Frameworks expose token counts after the fact via observability tools. The only enforcement is SaaS-level (Portal26, agentbudget.dev) — no Python library provides a session-scoped cost ceiling that fires a hard process hook when crossed.
+3. **No tool-call arg validation + repair.** Frameworks silently coerce malformed args or let the tool handle them; tool responses carry HTTP 200 even when the call was effectively a no-op. The empirical bug taxonomy of 2,773 CrewAI + LangChain issues confirms "Self-Action" (actual tool use) is the most bug-dense lifecycle stage, dominated by JSON generation failures and tool-call looping.
+
+**Mitigations.**
+1. **In-process cost ceiling with hard kill-switch.** Attach a `BudgetGate(session_limit_usd=5.00, on_exceed=kill_fn)` to every agent loop. The callback fires *before* the next tool call, not after the bill arrives. Scope ceilings hierarchically: session → agent → sub-agent.
+2. **No-progress detector watching output entropy, not step count.** Compute n-gram Jaccard similarity between consecutive tool outputs. If the last N turns are above a similarity threshold (≈ stall), fire a no-progress signal and halt or escalate before the next call. A constraint-decay variant tracks structural adherence deltas across turns — catching the gradual collapse that loop counters miss (arxiv 2605.06445).
+3. **JSON-Schema-strict tool-call arg validation + LLM-driven repair hints.** Validate each tool call against a registered schema before it executes. On failure, surface per-field repair hints to the agent rather than silently coercing; PALADIN-style recovery lifts tool-failure recovery from 32.76% to 89.68% on unseen APIs (arxiv 2509.25238).
+4. **Rate-limit-aware retry scheduling.** Exponential backoff with provider-specific 429-header awareness prevents runaway retry storms from amplifying cost on transient failures.
+
+**Detection.**
+- **Cost-per-task alert.** Track cost at task granularity, not just session. Alert if cost-per-task exceeds 5× the p95 baseline — not just if the monthly bill looks wrong.
+- **Output-similarity rolling window.** Log the n-gram Jaccard score between consecutive tool outputs per agent. A sustained high-similarity window is a leading indicator of the runaway pattern — visible before budget is exhausted.
+- **Tool-call null rate per tool.** Track the fraction of calls to each tool that produce output below a minimum semantic change threshold. A rising null rate on a specific tool is the most targeted early signal.
+- **Structural adherence delta.** For multi-step tasks with explicit schema constraints, track what fraction of required fields are correctly populated per step. Constraint decay (monotonically dropping adherence) signals the collapse class that max_iterations doesn't catch (arxiv 2605.06445).
+
+**Related.** AP-02 (runaway tool-use loop — the simpler form, no cost ceiling), AP-03 (hallucinated tool calls), AP-05 (context bloat → cost explosion), AP-14 (silent retry masking failure).
+
+**References.**
+- earezki.com "I let my AI agent run overnight, it cost $437" (April 2026) — no in-process kill-switch; the agent looped on a task that should have taken minutes.
+- agentpatterns.tech "Infinite Loop" failure pattern (2026) — "$3,200 burned across 68 loop failures over a single weekend"; 847 API calls for a simple "current weather in Tokyo" query before manual termination.
+- Portal26 Agentic Token Controls (April 2026) — "industry first" admin-facing kill-switch; SaaS-only launch confirms the **in-process library gap** is open and unoccupied.
+- arxiv 2602.21806 (February 2026) — empirical taxonomy of **2,773 bug reports** (CrewAI 1,660 + LangChain 1,113); "Self-Action" stage (actual tool use) is the most bug-dense lifecycle stage; top symptoms: JSON generation failures, tool-call looping, hallucinated tool calls.
+- arxiv 2509.25238 "PALADIN: Self-Correcting Language Model Agents to Cure Tool-Failure Cases" (ICLR 2026) — tool-failure recovery rate improves from **32.76% to 89.68%** via recovery-annotated trajectories; generalizes to 95.2% on unseen APIs.
+- arxiv 2605.06445 "Constraint Decay: The Fragility of LLM Agents in Backend Code Generation" (May 2026) — structural constraint adherence declines monotonically as requirements accumulate; a distinct no-progress failure mode invisible to max_iterations.
+- arxiv 2603.16586 "Runtime Governance for AI Agents: Policies on Paths" (March 2026) — non-deterministic, path-dependent behaviour requires path-state tracking for governance, not just per-step checks.
+- Datadog State of AI Engineering 2026 — 8.4 million rate-limit errors in March 2026 alone; rate limits account for ~30% of all LLM call errors.
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/agent_guard.py` (Pattern 12) — composable runtime guard middleware: `ToolCallValidator` (JSON-Schema-strict validation + repair hints), `BudgetGate` (hierarchical cost ceilings with kill hooks), `NoProgressDetector` (n-gram Jaccard stall detector), `RateLimitRetrier` (exponential backoff + jitter), `AgentGuard` (all four via one object). Zero external dependencies.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-27 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-28 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
