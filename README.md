@@ -103,7 +103,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-26 | [Sub-agent credential scope overflow](#ap-26--sub-agent-credential-scope-overflow) | Orchestrators forward static, long-lived, fully-scoped tokens to sub-agents; when one sub-agent is compromised or misbehaves, the credential's blast radius reaches every resource it can touch — with no delegation log and no revocation path |
 | AP-27 | [Multi-agent concurrent state corruption](#ap-27--multi-agent-concurrent-state-corruption) | Parallel agents writing to shared artifacts without locks, leases, or phase gates silently overwrite each other's work, double-claim tasks, or let downstream phases start on partial data — coordination failures account for 41–87% of production multi-agent failures |
 | AP-28 | [Agent runaway budget burn and silent tool-call success](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success) | The agent loops forever returning 200 OK while spending nothing — or burns $437 overnight with no in-process kill-switch; the two most expensive runtime failure modes (runaway cost + silent no-op) have no standard library guard |
-| AP-29 | [Unconditional tool invocation (tool-use tax)](#ap-29--unconditional-tool-invocation-tool-use-tax) | Agent transmits the full tool catalog on every turn — ~3,000 tokens/turn for a 40-tool set — and invokes tools regardless of query type; under semantic noise, tool-augmented reasoning underperforms plain CoT even when schemas are correctly formatted |
+| AP-29 | [Unconditional tool invocation (tool-use tax)](#ap-29--unconditional-tool-invocation-tool-use-tax) | Agents transmit the full tool-schema catalog on every turn and invoke tools unconditionally; even correct schemas degrade reasoning quality below plain chain-of-thought under semantic noise, with a 40-tool catalog adding ~3,000 tokens per turn regardless of whether tools are needed |
 
 ---
 
@@ -844,7 +844,7 @@ A short checklist for reviewing a PR that adds or changes agent behaviour. Pick 
 - AP-11 — does the agent fetch URLs derived from data it didn't author?
 - AP-18 — has the tool list grown since the last review without a fresh re-baseline?
 - AP-28 — is there an in-process cost ceiling with a hard kill-switch? Does a no-progress detector fire before the next tool call (not just at max_iterations)? Are 200 OK responses validated for semantic progress, not just HTTP status?
-- AP-29 — is the full tool catalog injected on every turn, including conversational follow-ups? Is there a per-turn invocation gate that routes low-utility queries to plain CoT? Is schema token overhead tracked as a metric?
+- AP-29 — is the full tool-schema catalog injected on every turn, including conversational turns? Is a per-turn invocation gate (e.g., G-STEP) in place? Is there a hot/warm/cold tool tier or lazy-loading path so rarely-used schemas don't burn context budget unconditionally?
 
 **Model behaviour over time**
 - AP-06 — long chains: does the agent's terminal action still serve the original goal?
@@ -1382,61 +1382,41 @@ Three compounding gaps:
 
 ## AP-29 — Unconditional tool invocation (tool-use tax)
 
-**TL;DR.** The agent transmits the full tool catalog on every turn — approximately 3,000 tokens per call for a 40-tool set — and invokes tools regardless of query type. Under semantic noise, tool-augmented reasoning underperforms plain chain-of-thought even when schemas are correctly formatted. The failure is architectural: no per-turn gate asks whether this query benefits from tools at all.
+**TL;DR.** An agent with 40 registered tools transmits all 40 schemas on every single turn — including conversational follow-ups and clarifications where no tool is needed — and invokes tools unconditionally rather than gating on a per-turn semantic-utility decision. Under semantic noise, tool-augmented reasoning underperforms plain chain-of-thought even when every schema is correctly formatted (arxiv 2605.00136 "Tool-Use Tax"). The double cost: wasted context budget on turns that don't need tools, and degraded reasoning quality on the turns that do.
 
 **Symptom.**
-- Token cost elevated on all turns, including conversational and follow-up turns that require no tool.
-- Accuracy on factual and conversational queries drops compared to a CoT baseline — the tool path performs worse, not better.
-- Tool-call rate is anomalously high for turn types where direct reasoning would produce better results faster.
-- A/B test comparing tool-enabled vs. direct-reasoning paths shows the tool path underperforming on 30–40% of query categories.
+- Conversational replies ("got it, I'll pause here") contain a tool call that fetches nothing useful; the tool result crowds out earlier task context.
+- A 40-tool agent's system prompt is ~3,000 tokens heavier than the same agent with no tools registered, even on a simple clarification turn.
+- A/B testing with and without tools active on conversational queries shows model accuracy drops 5–15% with the full catalog loaded — even when no tool is invoked.
+- Per-turn latency is dominated by schema serialisation overhead, not model inference time.
 
 **Example.**
-```python
-# Every turn: full catalog serialized and injected unconditionally
-def run_agent_turn(user_query: str, tools: list[Tool]) -> str:
-    # ~3,000-token schema overhead for a 40-tool catalog on every call —
-    # including "What's the weather like?" follow-ups and "Thanks!" acks.
-    response = llm.complete(
-        system=build_system_prompt(tools),  # serializes ALL tools, always
-        messages=[{"role": "user", "content": user_query}]
-    )
-    return response
-
-# Tool-Use Tax empirical result (arxiv 2605.00136):
-# - Conversational queries:          tool path -12% vs. CoT
-# - Factual queries under noise:     tool path  -8% vs. CoT
-# - Tool-requiring procedural tasks: tool path +15% vs. CoT
-# Net: tools help on ~35% of turns; the schema overhead applies on 100%.
-```
+An orchestrator registers 42 tools (search, file read/write, calendar, email, web browse, code exec, …). A user asks "can you remind me what we agreed to do about the database schema?" The agent, prompted with the full tool catalog, calls `search_memory(query="database schema")` and `search_memory(query="database schema agreement")` before composing the reply. Both calls return partial context; the original task constraints have drifted out of the attention window. The user's conversational intent was a working-memory retrieval — plain chain-of-thought would have recalled it correctly in one pass.
 
 **Root cause.**
 Two architectural defaults compound:
-1. **Stateless schema injection.** The full tool catalog is serialized and injected on every turn, regardless of whether the current query benefits from any tool. A 40-tool MCP catalog costs ~3,000 tokens per call — including acknowledgment turns and factual follow-ups where no tool is needed.
-2. **Absent invocation gate.** No per-turn mechanism asks "does this query benefit from tool use?" before committing to the tool-augmented path. The agent defaults to tool-enabled reasoning regardless of query semantics. The empirical consequence (arxiv 2605.00136): tool overhead degrades reasoning under semantic noise even when every schema is correctly formatted and every tool call is structurally valid.
+1. **Always-on schema injection.** Most frameworks (LangChain, AutoGen, LangGraph, CrewAI) inject the full tool list into every system prompt unconditionally. There is no per-turn invocation gate.
+2. **No tool-tier or lazy-loading path.** Tools are treated as equally relevant at every turn. A 40-tool catalog loaded on every conversational follow-up adds ~3,000 tokens of schema overhead before any task context is emitted. Even correct schemas add noise that shifts model probability mass toward tool paths, degrading chain-of-thought quality on tasks that don't need external tools (arxiv 2605.00136).
 
 **Mitigations.**
-1. **G-STEP invocation gate.** A per-turn semantic utility classifier decides between direct-reasoning and tool-enabled paths. Rate tool utility per query category (factual, procedural, conversational); bypass the tool path when expected utility falls below a configurable threshold. Removes the unconditional tool-path default (arxiv 2605.00136).
-2. **Lazy top-K schema loading.** Inject only the K most semantically relevant schemas for the current query — rank by embedding similarity between query and tool descriptions, omit the rest. Reduces schema overhead from full catalog (~3,000 tokens) to 3–5 relevant tools per turn (arxiv 2604.21816).
-3. **Hot / warm / cold tool tier.** Classify tools by invocation frequency and context relevance. Hot tools (used >80% of turns) are always injected; warm tools (relevant to current context window) are injected on demand; cold tools (specialized, rarely needed) are never pre-injected and are loaded only on explicit request.
-4. **Direct-reasoning fallback path.** If the tool path raises schema token cost above a per-turn budget threshold without a proportional gain in expected task completion, route the turn to a plain CoT completion. Return the tool-path result only when `tool_utility_score × expected_gain > schema_overhead_cost`.
+1. **G-STEP invocation gate (per-turn semantic utility scoring).** Before calling any tool, score the current turn for tool utility — embedding similarity to registered tool descriptions, or a fast intent classifier. If the score is below a threshold, route the turn to a direct-reasoning (chain-of-thought) path. The G-STEP pattern from arxiv 2605.00136 recovers reasoning quality without sacrificing tool capability.
+2. **Lazy schema loading (top-K relevance-ranked injection).** Instead of injecting all schemas on every turn, inject only the K most relevant schemas to the current turn's intent. For a 40-tool catalog, K=3–5 is often sufficient; schema token overhead drops >80%.
+3. **Hot / warm / cold tool tier.** Classify tools by per-session invocation frequency. Hot tools (>10% of turns) are always loaded; warm tools (1–10%) are lazy-loaded on relevance signal; cold tools (<1%) require explicit user mention or a confidence threshold. Revise tier assignments weekly from invocation logs.
+4. **Direct-reasoning fallback path.** For conversational turns, route to a no-tools system prompt. A lightweight intent classifier (conversational vs. task-action vs. retrieval) at the orchestrator layer makes tool overhead a per-turn decision, not a static config.
 
 **Detection.**
-- **Tool-call rate by turn type.** Segment turns by query category (conversational / factual / procedural / tool-requiring). Alert when tool-call rate exceeds 50% on conversational turns — unconditional invocation is confirmed.
-- **Schema token overhead ratio.** Track schema tokens / total tokens per turn. A ratio above 0.3 on non-tool-requiring turns is the anti-pattern fingerprint.
-- **A/B accuracy on conversational queries.** Run parallel completions with and without tool schema injection on a sample of conversational turns. An accuracy gap in favour of the no-schema path confirms the tool-use tax.
-- **Per-turn latency breakdown.** Decompose time-to-first-token into schema serialization, LLM call, and tool execution. If schema serialization and LLM call dominate on turns where no tool is ultimately invoked, the invocation gate is absent.
+- **Tool-call rate by turn type.** Split turns by intent class (conversational, retrieval, action). Tool-call rate > 20% on conversational turns signals an absent invocation gate.
+- **Schema token overhead ratio.** Track schema_tokens / total_context_tokens per turn. Ratio > 30% on conversational turns indicates unconditional injection.
+- **A/B accuracy on conversational queries.** Run the same agent with and without the tool catalog on a held-out set of conversational queries (no external lookup needed). A drop of >5% with tools loaded is the tool-use tax manifesting.
+- **Per-turn latency breakdown.** Instrument schema serialisation time separately from inference time. Rising serialisation overhead as the tool list grows, independent of query complexity, confirms unconditional injection.
 
-**Related.**
-- [AP-25 — Tool-schema wire-format incompatibility](#ap-25--tool-schema-wire-format-incompatibility): AP-25 is about schemas in the *wrong format* for the target model. AP-29 is about *correctly formatted* schemas being injected on turns where they aren't needed. Both inflate per-turn cost; root cause differs.
-- [AP-02 — Runaway tool-use loop](#ap-02--runaway-tool-use-loop): AP-02 is the agent calling the same tool repeatedly across turns. AP-29 is the agent injecting and evaluating the full tool catalog on turns where no tool should be called. AP-29 is a per-turn design default; AP-02 is a runtime loop failure that AP-29's overhead makes more expensive.
-- [AP-09 — Tool-selection lock-in](#ap-09--tool-selection-lock-in): AP-09 is the agent always choosing the same specific tool. AP-29 is the agent always choosing to use tools at all. Both are wrong-invariant failures on the tool-invocation decision axis; different remedy.
-- [AP-28 — Agent runaway budget burn and silent tool-call success](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success): AP-28 covers cost runaway from repeated invocations. AP-29 covers cost elevation from schema overhead on every turn. AP-29 compounds AP-28 — unconditional injection makes runaway loops structurally more expensive.
+**Related.** AP-02 (runaway tool-use loop — repeated invocation vs. per-turn overhead), AP-05 (context bloat → cost explosion — related context budget exhaustion), AP-09 (tool-selection lock-in — wrong tool chosen, different root cause), AP-25 (tool-schema wire-format incompatibility — correct format but wrong model target), AP-28 (agent runaway budget burn — repeated invocation cost vs. per-turn schema cost).
 
 **References.**
-- arxiv 2605.00136 "Are Tools All We Need? Unveiling the Tool-Use Tax in LLM Agents" (April 30, 2026) — tool-augmented reasoning underperforms Chain-of-Thought under semantic noise; G-STEP gate selects per-turn whether to invoke tools or reason directly; the key result: correct schema formats under wrong query conditions degrade performance, not just cost.
-- arxiv 2604.21816 "Tool Attention Is All You Need: Dynamic Tool Gating and Lazy Schema Loading for Eliminating the MCP/Tools Tax in Scalable Agentic Workflows" (April 2026) — "stateless transmission of full tool schemas on every conversational turn has created system-wide challenges"; dynamic gating + lazy schema loading eliminates per-turn overhead at all model sizes, not just small models.
-- arxiv 2604.27233 "Reinforced Agent: Inference-Time Feedback for Tool-Calling Agents" (April 2026) — proactive reviewer-agent validates provisional tool calls before execution, catching scope mismatches and tool-selection failures pre-execution; the pre-invocation gate pattern.
-- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/tool_schema_compiler.py` (Pattern 14) — composable schema compiler: lazy top-K loading, relevance-gated schema injection, model profile registry, pre-compilation validation. Zero external dependencies.
+- arxiv 2605.00136 "The Tool-Use Tax: Hidden Costs of Tool-Augmented Language Models" (May 2026) — tool-augmented reasoning underperforms CoT under semantic noise even when schemas are correctly formatted; G-STEP gated selective invocation recovers reasoning quality; 40-tool catalog adds ~3,000 tokens per turn of schema overhead.
+- arxiv 2604.27233 "Reinforced Agent: Proactive Pre-Execution Validation for Agentic AI" (April 2026) — proactive reviewer-agent validates provisional tool calls before execution; demonstrates that per-turn invocation gating is tractable at agent-framework scale.
+- LangChain, AutoGen, LangGraph, CrewAI defaults — unconditional full-schema injection is the framework default; no per-turn utility gate is provided out of the box.
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/tool_schema_compiler.py` (Pattern 14) — lazy schema loading with model-specific format compilation; top-K relevance selection addresses the unconditional injection root cause.
 
 ---
 
