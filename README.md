@@ -71,7 +71,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs)
 - **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure) · [AP-23](#ap-23--tool-call-argument-injection) · [AP-28](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success) · [AP-29](#ap-29--unconditional-tool-invocation-tool-use-tax)
 - **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output) · [AP-24](#ap-24--memory-write-path-accumulation)
-- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility) · [AP-26](#ap-26--sub-agent-credential-scope-overflow) · [AP-27](#ap-27--multi-agent-concurrent-state-corruption)
+- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility) · [AP-26](#ap-26--sub-agent-credential-scope-overflow) · [AP-27](#ap-27--multi-agent-concurrent-state-corruption) · [AP-31](#ap-31--hallucinated-multi-agent-consensus)
 
 | # | Anti-pattern | One-line |
 |---|---|---|
@@ -105,6 +105,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-28 | [Agent runaway budget burn and silent tool-call success](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success) | The agent loops forever returning 200 OK while spending nothing — or burns $437 overnight with no in-process kill-switch; the two most expensive runtime failure modes (runaway cost + silent no-op) have no standard library guard |
 | AP-29 | [Unconditional tool invocation (tool-use tax)](#ap-29--unconditional-tool-invocation-tool-use-tax) | Agents transmit the full tool-schema catalog on every turn and invoke tools unconditionally; even correct schemas degrade reasoning quality below plain chain-of-thought under semantic noise, with a 40-tool catalog adding ~3,000 tokens per turn regardless of whether tools are needed |
 | AP-30 | [MCP marketplace supply chain injection](#ap-30--mcp-marketplace-supply-chain-injection) | A developer or orchestrator installs an MCP server from a public registry without verifying its identity or integrity; a typosquatted or ownership-transferred server injects attacker-controlled tool descriptions into the agent's context, escalating from metadata poisoning to arbitrary command execution via stdio transport |
+| AP-31 | [Hallucinated multi-agent consensus](#ap-31--hallucinated-multi-agent-consensus) | Agents verbally report agreement or task completion without writing committed state to any shared store; the coordinator proceeds as if coordination happened, but no actual state change has been verified — accounting for a distinct category within the 79% coordination failure rate in production multi-agent systems |
 
 ---
 
@@ -1466,9 +1467,53 @@ MCP server registries and marketplaces have no mandatory code-signing, no mainta
 
 ---
 
+## AP-31 — Hallucinated multi-agent consensus
+
+**TL;DR.** Agents verbally report agreement or task completion without writing committed state to any shared store; the coordinator proceeds as if coordination happened, but no actual state change has been verified.
+
+**Symptom.**
+- A coordinator receives "I've completed phase 1" from two sub-agents and launches phase 2, but the shared work queue shows 0 phase-1 results committed.
+- Agents report "I agree with the analysis" in response to each other, but their output embeddings are semantically orthogonal (cosine distance ≈ 1.0) — the echo is a generation artifact, not a semantic alignment.
+- A multi-agent pipeline logs every step as green and marks the run complete, but the final artifact contains only the last agent's work; earlier agents' contributions were never written to the shared store.
+- Post-run state validation finds the shared store inconsistent with any agent's reported claims.
+
+**Example.**
+An orchestrator spawns three analysis agents on a shared research task. Agent A finishes its section and writes to its local context: "Section 1 analysis complete — proceeding." Agent B reads A's completion signal from the event bus and responds: "Confirmed, building on Agent A's analysis for section 2." The coordinator reads both messages and marks the coordination phase done. But Agent A's analysis was never committed to the shared knowledge store — it lived only in A's ephemeral context window. Agent B's "section 2" cites facts that no longer exist anywhere durable. The final assembled output silently omits section 1; no exception is raised, no lock is violated, no alert fires.
+
+Separately: two analyst agents in a financial workflow independently evaluate conflicting projections, then exchange messages saying "I agree with your risk assessment." The coordinator marks consensus reached and routes to the execution agent. Each analyst echoed the other's phrasing because that was the highest-probability continuation given the dialogue context — not because either evaluated the other's model against its own. The subsequent execution step proceeds on contradictory assumptions from two models that believed themselves to be aligned.
+
+**Root cause.**
+Verbal agreement and completion signals in LLM agents are inference outputs — generated by the same model that generates all other text. When coordination happens through natural-language messages without a corresponding write to a shared, persistent, auditable store, the coordinator has no ground truth to verify against. Three sub-causes compound:
+1. **Announcement ≠ commit.** Agents broadcast completion messages; nothing requires the broadcast to correlate with a state write to the shared store. The message and the commit are decoupled operations, and only the message is guaranteed to arrive.
+2. **Echo ≠ understanding.** When Agent B reads Agent A's analysis and replies "I agree," the reply is a conditional generation given the dialogue context — not a semantic alignment check against B's own prior beliefs. High-similarity surface language can mask high-distance belief content.
+3. **No post-coordination consistency check.** Coordinators rarely query shared store state after a claimed consensus before proceeding to the next phase. The architectural assumption is that verbal coordination is sufficient; the MAST study (arxiv 2503.13657) demonstrates it isn't across seven frameworks.
+
+**Mitigations.**
+1. **Commit-then-announce.** Require agents to write a structured result record to the shared store (`WorkQueue`, database, or named file) **before** broadcasting a completion message. The coordinator only proceeds when it can read the committed record — not when it receives the verbal signal. This pattern ensures "task complete" is backed by observable, durable state rather than an inference output.
+2. **Quorum confirmation with store-side verification.** After a claimed consensus, the coordinator independently queries the shared store and verifies that each participating agent's committed output is present and structurally valid (expected keys, record count, schema). Proceed only when the store confirms the expected postconditions; verbal agreement is a hint, store state is the authority.
+3. **Semantic divergence check before acting on agreement.** Before treating multiple agents' agreement signals as valid consensus, compute pairwise semantic similarity between the agents' last substantive outputs (cosine similarity of embeddings or n-gram overlap). If similarity is below a configured threshold (e.g., < 0.7), flag as potential hallucinated consensus and hold for human review rather than proceeding automatically. The `DriftMonitor` primitive in `agent-coord` implements this check on the event bus.
+4. **Agent-authored machine-readable postconditions.** Require each agent to append a structured postcondition claim to every completion message: `{"status": "done", "records_written": 3, "store_key": "agent-a-section1", "checksum": "<sha256>"}`. The coordinator verifies each claim against the store before treating it as valid. Divergence between the claimed and actual store state surfaces the hallucinated-consensus failure before the next phase starts rather than during post-mortem.
+
+**Detection.**
+- **Claimed-complete vs. committed-record invariant.** Count "task complete" messages received by the coordinator and independently count records committed to the shared store in the same phase. A ratio ≠ 1 is a hallucinated consensus event. Alert and hold rather than continuing the pipeline.
+- **Semantic similarity between claimed-agreeing agents.** Compute cosine similarity between the embedding of Agent A's last substantive output and Agent B's agreement response. Similarity < 0.6 indicates B agreed with something it didn't semantically process — hallucinated alignment rather than real consensus. A `DriftMonitor` attached to the event bus computes this continuously without a separate polling loop.
+- **Post-phase state validation.** After any coordination event, run a consistency check: all expected store keys present, all records structurally valid, no phase-1 outputs missing before phase-2 starts. Log and halt on violation; cascading failures downstream are an order of magnitude harder to diagnose than the original state gap.
+- **Time-to-commit invariant.** If an agent reports task completion but no corresponding write appears in the shared store within a configurable timeout (e.g., 30 seconds), flag as a hallucinated-completion event. This catches the case where the agent's verbalization of completion outpaced actual state commitment or where the state write failed silently.
+
+**Related.** AP-12 (agent-to-agent injection — malicious content laundered through one agent into another; different threat model, same multi-agent context), AP-13 (planner/executor divergence — plan says one thing, executor does another; distinct because hallucinated consensus is about *inter-agent* belief alignment across agents, not intra-agent plan/execute mismatch), AP-21 (long-horizon agent state collapse — state inconsistency accumulates over time; AP-31 is specifically the false-consensus trigger that initiates undetected state divergence), AP-27 (multi-agent concurrent state corruption — physical state corruption from concurrent writes without locks; AP-31 is semantic-belief misalignment that produces no lock violation, no exception, and no detectable write conflict).
+
+**References.**
+- arxiv 2503.13657 "Why Do Multi-Agent LLM Systems Fail? The MAST Study" (2025) — 1,642 execution traces across 7 open-source frameworks; **"hallucinated consensus" named as a distinct, recurrent failure mode**; agents produce semantically-plausible agreement signals while actual state divergence accumulates silently; most failures originate at system boundaries, not within individual model calls.
+- arxiv 2604.16339 "Semantic Consensus: Process-Aware Conflict Detection and Resolution for Enterprise Multi-Agent LLM Systems" (April 2026) — Semantic Consensus Framework achieves **100% workflow completion** across AutoGen/CrewAI/LangGraph where coordination-without-verification baselines fail; 79% of multi-agent failures are coordination issues not model capability — confirming that natural-language coordination signals without store-side verification are structurally insufficient.
+- arxiv 2601.04170 "Agent Drift: Quantifying Behavioral Degradation in Multi-Agent LLM Systems" — inter-agent misalignment accounts for **36.9% of all observed failure modes**; production failure rates 41–86.7%; hallucinated alignment is the primary mechanism by which misalignment goes undetected long enough to cascade.
+- arxiv 2605.03310 "Coordination as an Architectural Layer for LLM-Based Multi-Agent Systems" (May 2026) — information-controlled empirical study provides causal isolation of coordination configuration effects; confirms "neither cataloguing failure modes nor shipping declarative orchestration frameworks delivers a principled mapping from coordination configuration to predictable failure-mode signature" — backing the need for explicit verifiable coordination primitives rather than natural-language coordination signals.
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/agent_coord.py` (Pattern 11) — `WorkQueue.claim/release` (commit-then-announce with atomic store writes), `EventBus` (auditable cross-agent signaling), and `DriftMonitor` (semantic divergence detection) implement the four mitigations above as composable, zero-dependency Python primitives.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-30 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-31 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
