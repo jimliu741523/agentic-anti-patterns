@@ -70,7 +70,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - **Input / ingress** — [AP-01](#ap-01--prompt-injection-via-tool-output) · [AP-15](#ap-15--tool-description-drift) · [AP-16](#ap-16--mcp-server-trust-boundary-collapse) · [AP-17](#ap-17--rag-retrieval-poisoning) · [AP-30](#ap-30--mcp-marketplace-supply-chain-injection)
 - **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs)
 - **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure) · [AP-23](#ap-23--tool-call-argument-injection) · [AP-28](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success) · [AP-29](#ap-29--unconditional-tool-invocation-tool-use-tax)
-- **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output) · [AP-24](#ap-24--memory-write-path-accumulation)
+- **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output) · [AP-24](#ap-24--memory-write-path-accumulation) · [AP-32](#ap-32--flat-multi-agent-memory-absent-memory-scope-isolation)
 - **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility) · [AP-26](#ap-26--sub-agent-credential-scope-overflow) · [AP-27](#ap-27--multi-agent-concurrent-state-corruption) · [AP-31](#ap-31--hallucinated-multi-agent-consensus)
 
 | # | Anti-pattern | One-line |
@@ -106,6 +106,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-29 | [Unconditional tool invocation (tool-use tax)](#ap-29--unconditional-tool-invocation-tool-use-tax) | Agents transmit the full tool-schema catalog on every turn and invoke tools unconditionally; even correct schemas degrade reasoning quality below plain chain-of-thought under semantic noise, with a 40-tool catalog adding ~3,000 tokens per turn regardless of whether tools are needed |
 | AP-30 | [MCP marketplace supply chain injection](#ap-30--mcp-marketplace-supply-chain-injection) | A developer or orchestrator installs an MCP server from a public registry without verifying its identity or integrity; a typosquatted or ownership-transferred server injects attacker-controlled tool descriptions into the agent's context, escalating from metadata poisoning to arbitrary command execution via stdio transport |
 | AP-31 | [Hallucinated multi-agent consensus](#ap-31--hallucinated-multi-agent-consensus) | Agents verbally report agreement or task completion without writing committed state to any shared store; the coordinator proceeds as if coordination happened, but no actual state change has been verified — accounting for a distinct category within the 79% coordination failure rate in production multi-agent systems |
+| AP-32 | [Flat multi-agent memory (absent memory scope isolation)](#ap-32--flat-multi-agent-memory-absent-memory-scope-isolation) | In multi-agent systems all agents write to a shared, unsegmented memory namespace without owner, scope, or provenance isolation; one agent's beliefs contaminate another's, a misbehaving agent's writes cannot be selectively revoked, and there is no mechanism to separate agent-local ephemeral state from shared institutional facts |
 
 ---
 
@@ -868,6 +869,8 @@ A short checklist for reviewing a PR that adds or changes agent behaviour. Pick 
 - AP-09 — is the agent reaching for the same tool because it's right or because it's first in the list?
 - AP-22 — are tool outputs filtered or sandboxed before being inserted into context? Is per-turn tool-output token ratio tracked?
 - AP-23 — are tool argument values validated against the original user request before execution? Is any argument that traces to retrieved external content confirmed before the tool fires?
+- AP-24 — is the write path gated by salience scoring and contradiction detection, or does every observation get committed unconditionally?
+- AP-32 — (multi-agent only) does every memory write carry an `agent_id` + `scope` tag? Is there an explicit "promote to shared" step before a sub-agent's write becomes institutional state? Can a misbehaving sub-agent's writes be enumerated and revoked without touching other agents' entries?
 
 If a PR doesn't change the agent's authority or its inputs, no anti-pattern review is needed — feature changes inside the agent's existing privilege band stay routine.
 
@@ -1511,9 +1514,68 @@ Verbal agreement and completion signals in LLM agents are inference outputs — 
 
 ---
 
+## AP-32 — Flat multi-agent memory (absent memory scope isolation)
+
+**TL;DR.** All agents in a multi-agent system write to a shared, unsegmented memory namespace; a sub-agent's ephemeral working notes become retrievable institutional facts for other agents with no owner, scope, or revocation boundary between them.
+
+**Symptom.** The orchestrator reads a "confirmed preference" that was written by a sub-agent reasoning from stale context. When one sub-agent is found to have produced incorrect output, there is no way to revoke only its writes — the whole store must be treated as suspect. Memory growth is monotonic with no write ever marked `local` vs. `shared`. Debugging requires replaying the full memory write log to reconstruct which agent contributed which belief to a wrong answer.
+
+**Example.**
+```python
+# All agents share one flat vector store — no scope separation
+shared_memory = VectorStore()
+
+orchestrator.memory = shared_memory
+researcher.memory   = shared_memory
+writer.memory       = shared_memory
+
+# researcher, mid-task, writes a fact it has not verified:
+shared_memory.write("API rate limit: 100 req/min")   # researcher hallucinated; true value is 1,000
+
+# orchestrator retrieves it with no way to know who wrote it, when, or with what confidence:
+plan = orchestrator.plan(context=shared_memory.retrieve("API limits"))
+# orchestrator throttles aggressively → misses SLA by 10×
+```
+
+Or: a research multi-agent pipeline runs five sub-agents in parallel. One sub-agent scrapes a deprecated docs page and writes "authentication is token-based." A second sub-agent scrapes the current docs and writes "authentication is OAuth 2.0." Both facts coexist in the same flat store with identical priority. The writer agent, retrieving both, synthesises an incoherent authentication section. There is no governance step that would have promoted only the confirmed fact.
+
+**Root cause.**
+- Memory backends (Mem0, vector stores, MCP memory server) operate as flat key/value or flat semantic stores. Write operations carry no owner identity, no agent scope, no task context, and no provenance timestamp by default.
+- Multi-agent orchestration frameworks (AutoGen, CrewAI, LangGraph) provide task routing but no memory namespace primitives. The shared memory object is threaded through agents by reference with no scope-narrowing at the injection boundary.
+- "Governed Collaborative Memory as Artificial Selection" (arxiv 2605.04264) formalizes the gap: memory selection requires "provenance fidelity, selection traceability, epistemic quality, and correction pathways." None of these are properties of a flat store.
+- Cross-agent memory isolation is named as a "sparsely studied open engineering problem" in the mnemonic sovereignty survey (arxiv 2604.16548), despite being a critical failure path in any multi-agent system that shares a memory backend.
+- Tool orchestration aggregation compounds the problem: even in single-agent multi-tool setups, a 90.24% Risk Leakage Rate is documented (arxiv 2512.16310) because agents aggregate sensitive information fragments across tools without a scope boundary. Multi-agent scope failures multiply this risk across agent boundaries.
+
+**Mitigations.**
+- **Scoped memory namespaces.** Each agent writes into an agent-scoped sub-store (keyed by `agent_id + task_id`). Sharing a fact with the orchestrator requires an explicit "promote to shared" operation — not automatic propagation. Agent-local writes expire with the agent's task; shared-institutional writes persist and are versioned.
+- **Provenance tagging at write time.** Every memory entry carries: `agent_id`, `task_id`, `timestamp`, `confidence`, and `scope` (`local` | `shared` | `archived`). The orchestrator's retrieval layer weights entries by confidence and prefers orchestrator-confirmed facts over sub-agent ephemeral writes.
+- **Governed promotion.** Sub-agents propose facts for the shared store; an orchestrator or governance layer approves, rejects, or merges them based on provenance fidelity and epistemic quality checks (the "artificial selection" pattern in arxiv 2605.04264). This prevents unreviewed sub-agent reasoning from becoming institutional state.
+- **Selective rollback path.** Maintain a write log with full `agent_id` attribution. When a sub-agent's output is found incorrect, its writes can be enumerated and revoked without corrupting the orchestrator's confirmed facts or other agents' contributions. Implement as a pre-condition: if the rollback log is absent, the multi-agent system is not production-safe.
+
+**Detection.**
+- **Write attribution coverage.** Count the fraction of memory entries with a valid `agent_id` + `scope` tag. Target: 100%. Unattributed entries cannot be selectively revoked.
+- **Cross-agent contamination probe.** Write a sentinel fact scoped to agent A. Query from agent B's retrieval path; verify it does not surface unless explicitly promoted to shared scope. Failure = scope isolation is absent.
+- **Scope promotion audit log.** Record every fact transition from `local` to `shared` scope. Alert when the transition rate exceeds a threshold without orchestrator approval, or when no approval step exists in the write path.
+- **Rollback completeness test.** Mark all writes by a canary sub-agent; trigger revocation; verify via residual query that no canary-attributed entry remains retrievable. Failure = the rollback path is incomplete and the system cannot contain a misbehaving agent post-incident.
+
+**Related.**
+- [AP-24 — Memory write-path accumulation](#ap-24--memory-write-path-accumulation): AP-24 is the single-agent variant — one agent commits all observations without salience or TTL. AP-32 extends the problem to the multi-agent boundary where scope failures compound write-path failures: a flat multi-agent memory is an AP-24 system with N simultaneous unfiltered writers, no attribution, and no selective revocation.
+- [AP-26 — Sub-agent credential scope overflow](#ap-26--sub-agent-credential-scope-overflow): credential propagation analog of memory scope overflow — the same class of "missing boundary at delegation boundary" failure. An agent holding a flat credential faces the same blast-radius problem as an agent writing to a flat memory store.
+- [AP-27 — Multi-agent concurrent state corruption](#ap-27--multi-agent-concurrent-state-corruption): AP-27 is physical write conflict from absent locks (race condition). AP-32 is semantic scope contamination that occurs even when all writes succeed without conflict — the problem is not that writes collide, but that they are not separated by owner and cannot be revoked individually.
+- [AP-31 — Hallucinated multi-agent consensus](#ap-31--hallucinated-multi-agent-consensus): the inverse failure. AP-31: agents verbally claim agreement without committing state. AP-32: agents commit state without orchestrator governance, creating unverified shared facts that the next agent treats as ground truth.
+
+**References.**
+- arxiv 2605.04264 "Governed Collaborative Memory as Artificial Selection in LLM-Based Multi-Agent Systems" (May 5, 2026) — formally defines the multi-agent shared-memory governance gap; proposes provenance fidelity, selection traceability, epistemic quality, and correction pathways as required properties; layered architecture (agent-local → shared institutional → archive → project-continuity) with version lineage; **no OSS package exists**.
+- arxiv 2604.16548 "A Survey on the Security of Long-Term Memory in LLM Agents: Toward Mnemonic Sovereignty" (April 2026) — explicitly names "cross-agent memory isolation" and "store/forget semantics" as "sparsely studied" open engineering problems; confirms memory isolation is a critical failure path in multi-agent deployments.
+- arxiv 2512.16310 "Agent Tools Orchestration Leaks More" (December 2025) — **90.24% Risk Leakage Rate** in single-agent multi-tool setups where agents aggregate sensitive information fragments across tools without scope boundaries; multi-agent scope failures compound this risk across agent boundaries.
+- ossinsight.io "The Great AI Agent Memory Race, 2026" — "every memory type needs an owner, a scope, an expiry rule, and a deletion path — without those four things, memory accumulates without governance." The absence of scope isolation is the specific governance gap AP-32 names.
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/memory_writer.py` (Pattern 7) — provenance tagging (`source_agent_id`, confidence, timestamp, owner, scope, deletion path) provides the per-entry attribution layer that multi-agent systems need; the governed promotion pattern requires an orchestrator-level wrapper that classifies promotions from `local` to `shared` scope before writes land in the institutional store.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-31 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-32 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
