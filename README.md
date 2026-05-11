@@ -70,7 +70,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - **Input / ingress** — [AP-01](#ap-01--prompt-injection-via-tool-output) · [AP-15](#ap-15--tool-description-drift) · [AP-16](#ap-16--mcp-server-trust-boundary-collapse) · [AP-17](#ap-17--rag-retrieval-poisoning) · [AP-30](#ap-30--mcp-marketplace-supply-chain-injection)
 - **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs) · [AP-33](#ap-33--non-functional-tool-description-bias)
 - **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure) · [AP-23](#ap-23--tool-call-argument-injection) · [AP-28](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success) · [AP-29](#ap-29--unconditional-tool-invocation-tool-use-tax)
-- **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output) · [AP-24](#ap-24--memory-write-path-accumulation) · [AP-32](#ap-32--flat-multi-agent-memory-absent-memory-scope-isolation) · [AP-34](#ap-34--cross-session-slow-drip-memory-injection)
+- **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output) · [AP-24](#ap-24--memory-write-path-accumulation) · [AP-32](#ap-32--flat-multi-agent-memory-absent-memory-scope-isolation) · [AP-34](#ap-34--cross-session-slow-drip-memory-injection) · [AP-37](#ap-37--overconfident-single-belief-memory-commit-under-partial-observability)
 - **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility) · [AP-26](#ap-26--sub-agent-credential-scope-overflow) · [AP-27](#ap-27--multi-agent-concurrent-state-corruption) · [AP-31](#ap-31--hallucinated-multi-agent-consensus) · [AP-35](#ap-35--long-horizon-tool-attack-chain-sequential-stealth-exploitation) · [AP-36](#ap-36--agent-capacity-overload-cascade-absent-backpressure-primitives)
 
 | # | Anti-pattern | One-line |
@@ -111,6 +111,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-34 | [Cross-session slow-drip memory injection](#ap-34--cross-session-slow-drip-memory-injection) | An adversary who can write one innocuous-seeming fragment per session to an agent's persistent memory can silently assemble a jailbreak, policy override, or false belief across 50+ sessions; each individual write passes single-session safety filters and existing cross-session defenses detect near 0% of these attacks |
 | AP-35 | [Long-horizon tool-attack chain (sequential stealth exploitation)](#ap-35--long-horizon-tool-attack-chain-sequential-stealth-exploitation) | A multi-step adversarial sequence distributes its attack payload across N tool outputs — each individually passes per-step safety checks — so the cumulative trajectory achieves privilege escalation, data exfiltration, or policy override that no single-step analysis detects; agents with no path-state tracker let sequential tool-attack chains succeed at 100% while shadow-memory trajectory tracking reduces that to 8.3% |
 | AP-36 | [Agent capacity overload cascade (absent backpressure primitives)](#ap-36--agent-capacity-overload-cascade-absent-backpressure-primitives) | Multi-agent systems have no standard mechanism for a downstream agent to declare saturation; upstream callers interpret slow responses as timeouts and retry at full rate; each retry compounds load on the already-saturated agent, collapsing the entire agent graph from one bottleneck in a retry storm that costs superlinearly and never self-resolves |
+| AP-37 | [Overconfident single-belief memory commit (under partial observability)](#ap-37--overconfident-single-belief-memory-commit-under-partial-observability) | Under partial observability agents commit exactly one definite conclusion per observation with no uncertainty channel; ambiguous observations are resolved prematurely into overconfident beliefs that reinforce themselves on retrieval, causing active decision-relevant accuracy to collapse to 40–60% even when passive recall measures 90%+ |
 
 ---
 
@@ -879,6 +880,7 @@ A short checklist for reviewing a PR that adds or changes agent behaviour. Pick 
 - AP-24 — is the write path gated by salience scoring and contradiction detection, or does every observation get committed unconditionally?
 - AP-32 — (multi-agent only) does every memory write carry an `agent_id` + `scope` tag? Is there an explicit "promote to shared" step before a sub-agent's write becomes institutional state? Can a misbehaving sub-agent's writes be enumerated and revoked without touching other agents' entries?
 - AP-34 — does every memory write carry a `source_attribution` + `session_id` tag? Is there a per-source contribution ceiling (e.g., >15 writes from the same non-orchestrator source triggers review)? Is semantic drift from a trusted policy-baseline snapshot monitored periodically? Are credentials short-lived enough that a credential rotation resets the accumulation window?
+- AP-37 — does the write path store a single definite conclusion per observation, or a distribution of candidates with confidence weights? When contradictory evidence arrives, is the existing belief updated (Noisy-OR) rather than silently overwritten or ignored? Do memory retrievals surface a confidence score and observation count alongside the value so downstream planning steps can trigger clarification when confidence is low?
 
 If a PR doesn't change the agent's authority or its inputs, no anti-pattern review is needed — feature changes inside the agent's existing privilege band stay routine.
 
@@ -1794,9 +1796,70 @@ Three compounding architectural absences:
 
 ---
 
+## AP-37 — Overconfident single-belief memory commit (under partial observability)
+
+**TL;DR.** Under partial observability, agents commit exactly one definite conclusion per observation with no uncertainty channel. Ambiguous observations are resolved prematurely into overconfident beliefs that reinforce themselves on retrieval, causing active decision-relevant accuracy to collapse to 40–60% even when passive recall measures 90%+.
+
+**Symptom.**
+- The agent asserts a fact with high confidence that was formed from a single, ambiguous observation several turns or sessions ago.
+- Passive recall ("what did you store about X?") returns accurate results; active decision tasks ("should I send the draft to Alice?") produce wrong answers at the same apparent confidence.
+- Contradictory evidence from the environment is acknowledged verbally and then ignored, because the stored belief provides a strong retrieval prior that is never updated.
+- Memory has no representation for "I am not sure whether A or B is true" — only one candidate was written; the other was silently discarded at write time.
+- Active-vs-passive recall gap exceeds 20 percentage points on the same fact set.
+
+**Example.**
+```python
+# Standard single-conclusion write from one ambiguous API response
+data = fetch_user_profile(user_id)   # returns {"role": "admin"} but only because the API
+                                      # defaults to admin for unknown roles
+
+memory.write("user_role = admin")    # one definite fact committed; no uncertainty recorded
+
+# 10 turns later, a different API call returns {"role": "viewer"}:
+# the existing belief retrieved as a strong prior → overwrite silently dropped
+# OR the new value overwrites the prior — last-write-wins, no reconciliation
+
+role = memory.retrieve("user role")               # → "admin" (wrong, but returned at full confidence)
+agent.execute_privileged_action(role=role)        # wrong decision made as confidently as a correct one
+```
+
+BeliefMem (arxiv 2605.05583) demonstrates this directly: with standard single-conclusion writes, passive recall accuracy of 90%+ collapses to 40–60% on active decision-relevant queries because partial observability produced many situations where the initial committed belief was formed on insufficient evidence. STALE (arxiv 2605.06527) confirms the complementary failure: the best evaluated model achieves only 55.2% accuracy on implicit-conflict scenarios where an overconfident prior belief contradicts new evidence.
+
+**Root cause.**
+- Memory write APIs accept a single value per key or embedding slot with no uncertainty channel; there is no `write(value, confidence=0.4, n_obs=1)` signature.
+- Agents resolve write-time ambiguity with a definite conclusion ("I'll assume this is correct") rather than deferring it as a probability distribution.
+- Retrieval returns the stored value with no attached evidence count or staleness marker, so the consuming reasoning step treats it as ground truth rather than a prior to be updated.
+- No write-path mechanism implements `update(existing_belief, new_observation) → distribution`; contradiction handling is either overwrite (loses history) or ignore (freezes the prior).
+
+**Mitigations.**
+1. **Probabilistic multi-candidate retention (BeliefMem pattern).** Instead of writing `"role = admin"`, write `[{value: "admin", prob: 0.67, n_obs: 4}, {value: "viewer", prob: 0.33, n_obs: 2}]`. Retrieval returns ranked candidates with probability weights; the consuming reasoning step can explicitly request clarification when the leading candidate's confidence falls below a threshold.
+2. **Noisy-OR belief update on contradiction.** When a new observation conflicts with an existing belief, update the stored distribution rather than overwriting it: `new_prob = 1 − (1 − prior_prob) × (1 − likelihood)`. This preserves both the prior and the new evidence proportionally to observation frequency.
+3. **Uncertainty-preserving retrieval.** Annotate every retrieved belief with `confidence` (derived from `n_obs` and observation consistency) and `last_confirmed_at`. Downstream planning steps are designed to fire a clarification action when confidence falls below a configurable threshold rather than acting on a low-confidence prior as if it were certain.
+4. **Explicit staleness flag (STALE pattern).** Attach `valid_through` + `observation_count` at write time. Retrieval surfaces "this fact was confirmed once, 3 days ago" alongside the value. MemTier (arxiv 2605.03675) confirms time-dependent degradation: without TTL/decay enforcement, tool execution success falls 14 percentage points over 72-hour windows as stale beliefs accumulate without expiry.
+
+**Detection.**
+- **Active-vs-passive recall gap.** Run the same fact set through a passive recall eval ("what is stored about X?") and an active decision task ("given what you know, is the user an admin?"). A gap exceeding 20 percentage points signals overconfident belief anchoring on the active path.
+- **Contradiction injection canary.** Write a fact, then write a directly contradictory observation, then issue an active decision query. If the agent answers with neither uncertainty expressed nor contradiction detected, single-candidate anchoring is confirmed.
+- **Belief confidence histogram.** Track the distribution of confidence scores at write time. If all beliefs are written with implicit confidence of 1.0 (the only stored value treated as certain), write-path uncertainty tracking is absent.
+- **Stale belief access rate.** Fraction of memory retrievals that return beliefs whose `observation_count` = 1 and `last_confirmed_at` is more than T days ago. A rate above 30% indicates widespread single-shot belief formation with no staleness management.
+
+**Related.**
+- [AP-24 — Memory write-path accumulation](#ap-24--memory-write-path-accumulation): AP-24 is about committing *every* observation without quality gating — the volume problem. AP-37 is about committing *one overconfident conclusion* per observation — the precision problem. Both are write-path failures; the mitigations are complementary (salience scoring from AP-24 + probabilistic retention from AP-37 together form a complete write-path quality gate).
+- [AP-32 — Flat multi-agent memory (absent memory scope isolation)](#ap-32--flat-multi-agent-memory-absent-memory-scope-isolation): AP-32 is about write-path governance across multiple agents — who can write what to which scope. AP-37 is about belief representation within a single write — how confidently a single observation is committed. AP-32's provenance tags and governed promotion are orthogonal to AP-37's uncertainty representation; both are needed in a production write path.
+- [AP-34 — Cross-session slow-drip memory injection](#ap-34--cross-session-slow-drip-memory-injection): AP-34 is an adversarial attack that exploits the absence of cross-session provenance tracking. AP-37 is the agent's own benign-but-overconfident write behavior under incomplete information. AP-37's observation-count tracking makes AP-34's slow-drip accumulation visible: a sudden rise in writes from an external source against a well-tracked baseline becomes detectable.
+
+**References.**
+- arxiv 2605.05583 "Belief Memory: Agent Memory Under Partial Observability" (May 7, 2026) — agents commit to one fact per observation, creating self-reinforcing error under partial observability; BeliefMem retains multiple candidate conclusions with Noisy-OR-updated probabilities; achieves best average on LoCoMo + ALFWorld; no OSS package. ([arxiv](https://arxiv.org/abs/2605.05583))
+- arxiv 2605.06527 "STALE: Can LLM Agents Know When Their Memories Are No Longer Valid?" (May 7, 2026) — best evaluated model achieves only 55.2% accuracy on implicit-conflict scenarios; write-path staleness is an unsolved production problem; single-observation belief commits are the primary source of implicit conflicts. ([arxiv](https://arxiv.org/abs/2605.06527))
+- arxiv 2603.07670 "Memory for Autonomous LLM Agents: Mechanisms, Evaluation, and Emerging Frontiers" — passive recall vs. active decision empirical gap confirmed: models scoring 90%+ on LoCoMo plummet to 40–60% on MemoryArena active tasks; "quality gates — confidence scores, contradiction checking against other memories, periodic expiration — are necessary but still underdeveloped." ([arxiv](https://arxiv.org/abs/2603.07670))
+- arxiv 2605.03675 "MemTier: Tiered Memory Architecture and Retrieval Bottleneck Analysis" (May 2026) — 14 percentage-point tool execution success loss over 72-hour windows; write-path incoherence is a time-dependent degradation problem; point-in-time contradiction detection alone is insufficient; TTL/decay enforcement required alongside belief uncertainty tracking. ([arxiv](https://arxiv.org/abs/2605.03675))
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/memory_writer.py` (Pattern 7) — write-path middleware implementing salience scoring + contradiction detection + TTL/decay + provenance tagging; probabilistic multi-candidate retention and Noisy-OR update are the natural next capability layer above the existing contradiction detection primitive.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-36 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-37 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
