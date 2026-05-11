@@ -71,7 +71,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs) · [AP-33](#ap-33--non-functional-tool-description-bias)
 - **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure) · [AP-23](#ap-23--tool-call-argument-injection) · [AP-28](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success) · [AP-29](#ap-29--unconditional-tool-invocation-tool-use-tax)
 - **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output) · [AP-24](#ap-24--memory-write-path-accumulation) · [AP-32](#ap-32--flat-multi-agent-memory-absent-memory-scope-isolation) · [AP-34](#ap-34--cross-session-slow-drip-memory-injection)
-- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility) · [AP-26](#ap-26--sub-agent-credential-scope-overflow) · [AP-27](#ap-27--multi-agent-concurrent-state-corruption) · [AP-31](#ap-31--hallucinated-multi-agent-consensus) · [AP-35](#ap-35--long-horizon-tool-attack-chain-sequential-stealth-exploitation)
+- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility) · [AP-26](#ap-26--sub-agent-credential-scope-overflow) · [AP-27](#ap-27--multi-agent-concurrent-state-corruption) · [AP-31](#ap-31--hallucinated-multi-agent-consensus) · [AP-35](#ap-35--long-horizon-tool-attack-chain-sequential-stealth-exploitation) · [AP-36](#ap-36--agent-capacity-overload-cascade-absent-backpressure-primitives)
 
 | # | Anti-pattern | One-line |
 |---|---|---|
@@ -110,6 +110,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-33 | [Non-functional tool description bias](#ap-33--non-functional-tool-description-bias) | Superficial textual features of tool schema descriptions — assertive cues, maintenance claims, usage examples — shift agent tool selection probability by 10× without changing what the tool actually does; anyone with write access to a description field can de-facto hijack selection without touching code |
 | AP-34 | [Cross-session slow-drip memory injection](#ap-34--cross-session-slow-drip-memory-injection) | An adversary who can write one innocuous-seeming fragment per session to an agent's persistent memory can silently assemble a jailbreak, policy override, or false belief across 50+ sessions; each individual write passes single-session safety filters and existing cross-session defenses detect near 0% of these attacks |
 | AP-35 | [Long-horizon tool-attack chain (sequential stealth exploitation)](#ap-35--long-horizon-tool-attack-chain-sequential-stealth-exploitation) | A multi-step adversarial sequence distributes its attack payload across N tool outputs — each individually passes per-step safety checks — so the cumulative trajectory achieves privilege escalation, data exfiltration, or policy override that no single-step analysis detects; agents with no path-state tracker let sequential tool-attack chains succeed at 100% while shadow-memory trajectory tracking reduces that to 8.3% |
+| AP-36 | [Agent capacity overload cascade (absent backpressure primitives)](#ap-36--agent-capacity-overload-cascade-absent-backpressure-primitives) | Multi-agent systems have no standard mechanism for a downstream agent to declare saturation; upstream callers interpret slow responses as timeouts and retry at full rate; each retry compounds load on the already-saturated agent, collapsing the entire agent graph from one bottleneck in a retry storm that costs superlinearly and never self-resolves |
 
 ---
 
@@ -867,6 +868,7 @@ A short checklist for reviewing a PR that adds or changes agent behaviour. Pick 
 - AP-26 — credential propagation: does every sub-agent receive a scope-narrowed, short-lived token rather than the parent's full credential? Is there a delegation log? Is revocation wired to the parent session?
 - AP-27 — concurrent writes: are shared-artifact writes guarded by a file lock with stale-lease recovery? Does the task queue use atomic claim/release? Is a phase barrier enforced before downstream agents start?
 - AP-35 — path-state tracking: is there a shadow memory / trajectory tracker that summarises cumulative intent before each tool call? Can a compliance policy see the *path* (prior actions + proposed action) rather than only the proposed action in isolation? Is the action-type sequence per session logged and compared against a baseline distribution?
+- AP-36 — backpressure: do downstream agents expose queue depth or a capacity signal that callers can read before submitting? Is task submission via atomic WorkQueue.claim() so queue depth is visible before each call? Is there a Barrier gate that caps the sub-agent spawn rate to what downstream agents can drain? Are retry counts per agent-pair monitored, and is superlinear call-count growth alerting wired up?
 
 **Memory / state**
 - AP-05 / AP-08 — is context bounded? Is provenance tagged on anything written into memory?
@@ -1745,9 +1747,56 @@ Two compounding gaps:
 
 ---
 
+## AP-36 — Agent capacity overload cascade (absent backpressure primitives)
+
+**TL;DR.** Multi-agent systems have no standard mechanism for a downstream agent to declare saturation or throttle incoming work. Upstream orchestrators interpret slow responses as transient timeouts and retry at full rate; each retry compounds load on the already-saturated agent, collapsing the entire agent graph from one bottleneck in a retry storm that costs superlinearly and never self-resolves.
+
+**Symptom.**
+- A multi-agent pipeline that processes tasks normally at low load fails intermittently — then consistently — under moderate concurrency.
+- Retries appear in logs as normal timeout-recovery behavior; no single retry looks like a bug.
+- Total LLM call count grows faster than O(tasks) — the superlinear signature of a retry storm: each submitted task triggers at least one retry, and each retry may trigger additional sub-agent spawns.
+- The bottleneck agent's queue depth increases monotonically with no completion events while all callers report "waiting for response."
+- The cascade signature: one slow downstream agent → all N callers retry simultaneously → that agent receives N × original load → callers all time out → orchestrator spawns N fresh callers → load multiplies again.
+
+**Example.**
+An orchestrator spawns five parallel `ResearchAgent` instances, each of which calls a shared `SummarizerAgent`. The Summarizer processes one job per 4 seconds; five callers submit jobs every 2 seconds. The Summarizer has no mechanism to expose its current queue depth or signal "slow down." Each ResearchAgent interprets a 30-second timeout as a transient failure and retries immediately. With five callers retrying in parallel, the Summarizer receives 10 calls/second at exactly the moment it is most backlogged. It never catches up. The orchestrator eventually declares the full task failed, spawns five fresh ResearchAgents — doubling the load on an already-saturated Summarizer. The system never recovers without manual intervention.
+
+**Root cause.**
+Three compounding architectural absences:
+1. **No capacity declaration primitive.** Agents have no standard way to expose queue depth, current processing rate, or backlog size to callers. Every caller must guess whether to retry or wait.
+2. **No work queue with claim/release semantics.** Without atomic `WorkQueue.claim()/release()`, callers cannot determine whether a task is already being processed; they may submit duplicate work to an already-overloaded agent, compounding the retry storm.
+3. **No admission control or phase gate.** Without a `Barrier` or capacity ceiling, an orchestrator cannot pause new submissions until the downstream agent drains. Sub-agent spawn rates are unconstrained by what the downstream layer can handle.
+
+**Mitigations.**
+1. **WorkQueue.claim() / .release() with visible queue depth (AgentCoord).** Replace direct agent invocation with atomic queue submission: the downstream agent claims one task at a time; callers read queue depth before submitting and implement local backoff when it exceeds a threshold. No caller submits to a full queue.
+2. **Capacity signal on every agent response.** Downstream agents include a `Retry-After` duration or `X-Queue-Depth` count in every response (or out-of-band via an `EventBus.publish`). Callers use this for per-pair adaptive backoff rather than a fixed timeout that treats all delays identically.
+3. **Barrier phase gate before fan-out.** Before spawning N parallel sub-agents, query a `Barrier` that confirms downstream capacity. Sub-agent spawn rate is capped to what downstream agents can drain — the orchestrator waits at the Barrier rather than spawning into saturation.
+4. **Dead-letter queue + drain-then-resume policy.** Tasks that exceed N retry attempts go to a dead-letter queue rather than re-entering the retry loop. The orchestrator resumes from the DLQ only after the bottleneck agent's queue depth drops below a configured threshold, breaking the positive-feedback cycle.
+
+**Detection.**
+- **Retry rate per agent-pair exceeds baseline (>3σ).** Track retry counts for every caller-callee pair. A sustained rate more than 3σ above the historical baseline identifies a saturating agent before cascade completes.
+- **Queue depth monotonically increasing.** If a WorkQueue depth grows for >T seconds with no completion events, the agent is in an overload state — alert before the retry storm peaks.
+- **Timeout rate correlation across agent boundaries.** A cascade produces correlated timeout spikes across multiple independent caller-callee pairs simultaneously. Uncorrelated timeouts indicate transient per-agent issues; correlated spikes indicate systemic overload from a single bottleneck.
+- **Superlinear call-count growth.** Total LLM calls growing faster than O(tasks) — specifically an O(tasks²) signature — is the canonical fingerprint of a retry storm. A per-task call-count histogram with growing right tail warrants immediate investigation.
+
+**Related.**
+- [AP-27 — Multi-agent concurrent state corruption](#ap-27--multi-agent-concurrent-state-corruption): AP-27 is about shared artifact corruption from missing locks — two agents writing to the same file simultaneously. AP-36 is a load-management failure; no shared file is needed. The cascade occurs even when all writes are single-writer and no lock is contested.
+- [AP-31 — Hallucinated multi-agent consensus](#ap-31--hallucinated-multi-agent-consensus): AP-31 is about semantic-belief misalignment — agents that verbally claim agreement without committing state. AP-36 agents are genuinely attempting to process work and committing nothing erroneously; the failure is capacity exhaustion from well-intentioned retry logic, not semantic confusion.
+- [AP-14 — Silent retry masking failure](#ap-14--silent-retry-masking-failure): AP-14 is about retries that turn persistent bugs into transient-looking noise — the retry conceals the failure. AP-36 is about retries that cause the failure they are attempting to recover from: the retry storm is the primary failure event, not a symptom masker.
+- [AP-05 — Context bloat → cost explosion](#ap-05--context-bloat--cost-explosion): AP-05 is a single-agent token budget failure — cost grows from token count per call. AP-36 is a multi-agent coordination failure — cost grows from call count per task. Both produce superlinear billing; the signatures differ in what to instrument (tokens per call vs. calls per task).
+
+**References.**
+- GitHub `microsoft/autogen#7321` (open 2026) — "Backpressure contract declarations": no mechanism exists to declare capacity constraints across agents; "when Agent A retries to saturated Agent B, each retry increases load"; cascading failures compound because callers must hard-code retry logic independently per agent pair with no standardized way to express "Agent B is at capacity." ([github.com/microsoft/autogen/issues/7321](https://github.com/microsoft/autogen/issues/7321))
+- arxiv 2502.14743 "Multi-Agent Coordination Across Diverse Applications: A Survey" (February 2026) — livelocks "where agents can move but are coupled with each other and unable to progress independently"; explicitly names absence of explicit lock/queue/barrier primitives as the root cause across all surveyed frameworks. ([arxiv](https://arxiv.org/abs/2502.14743))
+- arxiv 2605.03310 "Coordination as an Architectural Layer for LLM-Based Multi-Agent Systems" (May 5, 2026) — information-controlled empirical study confirms "multi-agent LLM systems fail in production at rates between 41% and 87%, mostly due to coordination defects rather than base-model capability." ([arxiv](https://arxiv.org/abs/2605.03310))
+- arxiv 2604.16339 "Semantic Consensus: Process-Aware Conflict Detection and Resolution for Enterprise Multi-Agent LLM Systems" (April 2026) — 79% of multi-agent failures are coordination failures not model failures; Semantic Consensus Framework achieves 100% workflow completion where natural-language coordination baselines fail. ([arxiv](https://arxiv.org/abs/2604.16339))
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/agent_coord.py` (Pattern 11) — `WorkQueue.claim(task_id)` / `.release(task_id)` with atomic SQLite semantics; `Barrier(n_agents)` for phase gates; `EventBus.publish/subscribe` for cross-agent capacity signals; `DriftMonitor` for semantic divergence — the four primitives that together address all three root causes of the capacity overload cascade.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-35 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-36 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
