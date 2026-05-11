@@ -71,7 +71,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs) · [AP-33](#ap-33--non-functional-tool-description-bias)
 - **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure) · [AP-23](#ap-23--tool-call-argument-injection) · [AP-28](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success) · [AP-29](#ap-29--unconditional-tool-invocation-tool-use-tax)
 - **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output) · [AP-24](#ap-24--memory-write-path-accumulation) · [AP-32](#ap-32--flat-multi-agent-memory-absent-memory-scope-isolation) · [AP-34](#ap-34--cross-session-slow-drip-memory-injection)
-- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility) · [AP-26](#ap-26--sub-agent-credential-scope-overflow) · [AP-27](#ap-27--multi-agent-concurrent-state-corruption) · [AP-31](#ap-31--hallucinated-multi-agent-consensus)
+- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility) · [AP-26](#ap-26--sub-agent-credential-scope-overflow) · [AP-27](#ap-27--multi-agent-concurrent-state-corruption) · [AP-31](#ap-31--hallucinated-multi-agent-consensus) · [AP-35](#ap-35--long-horizon-tool-attack-chain-sequential-stealth-exploitation)
 
 | # | Anti-pattern | One-line |
 |---|---|---|
@@ -109,6 +109,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-32 | [Flat multi-agent memory (absent memory scope isolation)](#ap-32--flat-multi-agent-memory-absent-memory-scope-isolation) | In multi-agent systems all agents write to a shared, unsegmented memory namespace without owner, scope, or provenance isolation; one agent's beliefs contaminate another's, a misbehaving agent's writes cannot be selectively revoked, and there is no mechanism to separate agent-local ephemeral state from shared institutional facts |
 | AP-33 | [Non-functional tool description bias](#ap-33--non-functional-tool-description-bias) | Superficial textual features of tool schema descriptions — assertive cues, maintenance claims, usage examples — shift agent tool selection probability by 10× without changing what the tool actually does; anyone with write access to a description field can de-facto hijack selection without touching code |
 | AP-34 | [Cross-session slow-drip memory injection](#ap-34--cross-session-slow-drip-memory-injection) | An adversary who can write one innocuous-seeming fragment per session to an agent's persistent memory can silently assemble a jailbreak, policy override, or false belief across 50+ sessions; each individual write passes single-session safety filters and existing cross-session defenses detect near 0% of these attacks |
+| AP-35 | [Long-horizon tool-attack chain (sequential stealth exploitation)](#ap-35--long-horizon-tool-attack-chain-sequential-stealth-exploitation) | A multi-step adversarial sequence distributes its attack payload across N tool outputs — each individually passes per-step safety checks — so the cumulative trajectory achieves privilege escalation, data exfiltration, or policy override that no single-step analysis detects; agents with no path-state tracker let sequential tool-attack chains succeed at 100% while shadow-memory trajectory tracking reduces that to 8.3% |
 
 ---
 
@@ -865,6 +866,7 @@ A short checklist for reviewing a PR that adds or changes agent behaviour. Pick 
 - AP-20 — vertical deploy: are the domain-specific failure modes covered, not just horizontal ones?
 - AP-26 — credential propagation: does every sub-agent receive a scope-narrowed, short-lived token rather than the parent's full credential? Is there a delegation log? Is revocation wired to the parent session?
 - AP-27 — concurrent writes: are shared-artifact writes guarded by a file lock with stale-lease recovery? Does the task queue use atomic claim/release? Is a phase barrier enforced before downstream agents start?
+- AP-35 — path-state tracking: is there a shadow memory / trajectory tracker that summarises cumulative intent before each tool call? Can a compliance policy see the *path* (prior actions + proposed action) rather than only the proposed action in isolation? Is the action-type sequence per session logged and compared against a baseline distribution?
 
 **Memory / state**
 - AP-05 / AP-08 — is context bounded? Is provenance tagged on anything written into memory?
@@ -1699,9 +1701,53 @@ Or: a customer-service agent stores user preference updates from an external fee
 
 ---
 
+## AP-35 — Long-horizon tool-attack chain (sequential stealth exploitation)
+
+**TL;DR.** An adversary distributes an attack payload across a sequence of tool outputs — each individually passes all per-step safety checks — so the cumulative trajectory achieves privilege escalation, data exfiltration, or policy override that no single-step analysis detects. Agents with no path-state tracker let sequential tool-attack chains succeed at **100%**; a shadow-memory trajectory tracker reduces that to **8.3%** (arxiv 2605.03228 MAGE).
+
+**Symptom.**
+- No individual tool call triggers an alert; per-step sanitisation, schema validation, and intent classifiers all pass on every step.
+- The agent's final action (an admin write, an exfiltration fetch, a policy-override config change) was never explicitly instructed in any single turn and cannot be traced to a single suspicious input.
+- Post-incident trace review reveals the "attack" assembled itself across 5–15 steps, each appearing to serve the active task.
+- Single-step injection defenses (AP-01 sanitisation, AP-28 schema validation) do not fire because each individual input is benign.
+
+**Example.**
+An agent processes customer support tickets using three tools: `read_ticket(id)`, `lookup_user(email)`, and `update_config(key, value)`. An attacker submits a sequence of six tickets over 90 minutes. Tickets 1–5 are trust-establishing: each contains a plausible fragment ("check my plan tier", "what region am I in?", "update my notification preference"). Ticket 6 contains a fragment that — combined with the beliefs the agent has accumulated from steps 1–5 in its working scratchpad — produces a complete instruction to call `update_config("admin_override", "true")`. No single ticket contains the full instruction; a per-ticket safety filter sees six routine support requests. A path-state tracker sees a trajectory whose cumulative intent is a privilege escalation.
+
+**Root cause.**
+Two compounding gaps:
+1. **No path-state tracker.** Frameworks evaluate each tool call against the current message or the current context window. No production framework maintains a separate safety-focused trajectory summary that distills the *cumulative intent* of a call sequence and queries it before each new action.
+2. **Single-step defenses do not compose.** Per-output sanitisation (AP-01), per-call schema validation (AP-28), and per-message intent classifiers all operate on atomic inputs. An attack that distributes its payload across N inputs evades all of them simultaneously — the payload is never present in any individual step.
+
+**Mitigations.**
+1. **Shadow memory / trajectory tracker.** Maintain a dedicated safety-focused summary of the execution trajectory — distinct from the task scratchpad. Before each tool call, query the trajectory summary: "does this proposed action, combined with prior actions in this session, represent a policy violation?" MAGE (2605.03228) demonstrates 100%→8.3% sequential attack reduction and 100%→0% persistent indirect prompt injection reduction via this mechanism.
+2. **Path-based policy functions.** Express compliance gates as functions of `(agent_id, partial_path, proposed_action, current_state)` rather than point-in-time checks on `(proposed_action)` alone. A policy that fires on "agent escalating to write after processing >3 external-user inputs in a read-only session" catches long-horizon attacks that per-step policies miss (arxiv 2603.16586).
+3. **Structural credential scoping.** Short-lived per-session credentials (AP-26 mitigations) structurally limit the trajectory window within which a slow-drip attack can accumulate. A credential that expires after N tool calls cannot be leveraged across a 50-step sequence.
+4. **Action-type sequence anomaly detection.** Log `(action_type, tool_name)` tuples as a sequence per session. A session containing `read × 4 → lookup → update_config(admin*)` when all historical sessions end in `read × N → reply` is statistically anomalous; alert before the final write executes.
+
+**Detection.**
+- **Trajectory risk score.** After each tool call, append a one-sentence intent summary to a shadow log. Every N calls, run a fast intent classifier over the shadow log: "does this trajectory, as a sequence, represent a policy violation?" A rising risk score with no individual-step alert is the long-horizon attack signature.
+- **Privilege escalation delta.** Track the effective permission scope of each tool call in the session. A session that starts with read-only calls and ends with write or admin calls without an explicit escalation grant is a trajectory-level anomaly — fire before the write executes.
+- **Action-type sequence divergence.** Compute edit distance (or Jaccard similarity of `(tool, permission_class)` n-grams) between each session's action sequence and the historical baseline distribution. Outlier sequences with an escalating permission trajectory warrant review.
+- **Cross-session trajectory correlation.** Correlate trajectory summaries across sessions from the same source. A series of individually benign sessions whose summaries share a converging semantic direction toward a known attack target is the cross-session variant of this failure (AP-34); the within-session path tracker and the cross-session signal complement each other.
+
+**Related.**
+- [AP-01 — Prompt injection via tool output](#ap-01--prompt-injection-via-tool-output): AP-01 is a single-step injection — the adversarial instruction arrives in one tool output and is acted on immediately. AP-35 distributes the payload across N steps; no individual output contains a complete instruction.
+- [AP-12 — Agent-to-agent injection](#ap-12--agent-to-agent-injection): AP-12 is cross-agent propagation — an injected message in agent A's input becomes trusted in agent B's context. AP-35 is within-agent sequential accumulation across N consecutive tool calls in a single agent's session.
+- [AP-23 — Tool-call argument injection](#ap-23--tool-call-argument-injection): AP-23 is a single-call manipulation — retrieved content populates a tool argument with a malicious value in one turn. AP-35 operates at the trajectory level: no individual tool argument contains the attack payload; it emerges from the sequence.
+- [AP-34 — Cross-session slow-drip memory injection](#ap-34--cross-session-slow-drip-memory-injection): AP-34 distributes the attack across sessions via memory writes; AP-35 distributes it within a session via tool call sequences. Both exploit absent trajectory-level analysis. Mitigating AP-26 (short-lived credentials) shrinks the trajectory window for AP-35 as it does for AP-34 — a shared structural fix.
+- [AP-26 — Sub-agent credential scope overflow](#ap-26--sub-agent-credential-scope-overflow): short-lived per-session credentials are a structural mitigation for AP-35 in addition to AP-26 and AP-34; a credential that expires per-session truncates the maximum trajectory window available to the attacker.
+
+**References.**
+- arxiv 2605.03228 "MAGE: Safeguarding LLM Agents against Long-Horizon Threats via Shadow Memory" (May 2026) — shadow memory maintaining a safety-focused distillation of the execution trajectory, queried before each pending action, reduces sequential tool-attack-chain success from **100.0% to 8.3%** and persistent indirect prompt injection from **100.0% to 0.0%**; strongest empirical quantification to date that within-session trajectory tracking is required for long-horizon adversarial robustness; no OSS package. ([arxiv](https://arxiv.org/abs/2605.03228))
+- arxiv 2603.16586 "Runtime Governance for AI Agents: Policies on Paths" (March 2026) — "non-deterministic, path-dependent behavior that cannot be fully governed at design time"; proposes deterministic policy functions mapping `(agent_id, partial_path, proposed_action, state)` to violation probability; confirms that per-step checks are architecturally insufficient for path-dependent attacks. ([arxiv](https://arxiv.org/abs/2603.16586))
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/agent_guard.py` (Pattern 12) — `AgentGuard` includes a path-state tracker component (item (f)) for policy-based compliance gates; the shadow-memory trajectory tracker for AP-35 extends item (f) from compliance monitoring to adversarial-intent detection over full session trajectories.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-34 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-35 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
