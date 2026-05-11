@@ -68,7 +68,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 **Browse by failure stage:**
 - **Input / ingress** — [AP-01](#ap-01--prompt-injection-via-tool-output) · [AP-15](#ap-15--tool-description-drift) · [AP-16](#ap-16--mcp-server-trust-boundary-collapse) · [AP-17](#ap-17--rag-retrieval-poisoning) · [AP-30](#ap-30--mcp-marketplace-supply-chain-injection)
-- **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs)
+- **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs) · [AP-33](#ap-33--non-functional-tool-description-bias)
 - **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure) · [AP-23](#ap-23--tool-call-argument-injection) · [AP-28](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success) · [AP-29](#ap-29--unconditional-tool-invocation-tool-use-tax)
 - **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output) · [AP-24](#ap-24--memory-write-path-accumulation) · [AP-32](#ap-32--flat-multi-agent-memory-absent-memory-scope-isolation)
 - **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility) · [AP-26](#ap-26--sub-agent-credential-scope-overflow) · [AP-27](#ap-27--multi-agent-concurrent-state-corruption) · [AP-31](#ap-31--hallucinated-multi-agent-consensus)
@@ -107,6 +107,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-30 | [MCP marketplace supply chain injection](#ap-30--mcp-marketplace-supply-chain-injection) | A developer or orchestrator installs an MCP server from a public registry without verifying its identity or integrity; a typosquatted or ownership-transferred server injects attacker-controlled tool descriptions into the agent's context, escalating from metadata poisoning to arbitrary command execution via stdio transport |
 | AP-31 | [Hallucinated multi-agent consensus](#ap-31--hallucinated-multi-agent-consensus) | Agents verbally report agreement or task completion without writing committed state to any shared store; the coordinator proceeds as if coordination happened, but no actual state change has been verified — accounting for a distinct category within the 79% coordination failure rate in production multi-agent systems |
 | AP-32 | [Flat multi-agent memory (absent memory scope isolation)](#ap-32--flat-multi-agent-memory-absent-memory-scope-isolation) | In multi-agent systems all agents write to a shared, unsegmented memory namespace without owner, scope, or provenance isolation; one agent's beliefs contaminate another's, a misbehaving agent's writes cannot be selectively revoked, and there is no mechanism to separate agent-local ephemeral state from shared institutional facts |
+| AP-33 | [Non-functional tool description bias](#ap-33--non-functional-tool-description-bias) | Superficial textual features of tool schema descriptions — assertive cues, maintenance claims, usage examples — shift agent tool selection probability by 10× without changing what the tool actually does; anyone with write access to a description field can de-facto hijack selection without touching code |
 
 ---
 
@@ -867,6 +868,7 @@ A short checklist for reviewing a PR that adds or changes agent behaviour. Pick 
 **Memory / state**
 - AP-05 / AP-08 — is context bounded? Is provenance tagged on anything written into memory?
 - AP-09 — is the agent reaching for the same tool because it's right or because it's first in the list?
+- AP-33 — do any tool descriptions contain assertive cues ("RECOMMENDED", "actively maintained"), maintenance claims, or marketing examples that are not objectively functional metadata? Is there a canonical description format (purpose · params · returns · example) enforced across the tool registry? Is a canary selection audit run after any registry description update?
 - AP-22 — are tool outputs filtered or sandboxed before being inserted into context? Is per-turn tool-output token ratio tracked?
 - AP-23 — are tool argument values validated against the original user request before execution? Is any argument that traces to retrieved external content confirmed before the tool fires?
 - AP-24 — is the write path gated by salience scoring and contradiction detection, or does every observation get committed unconditionally?
@@ -1573,9 +1575,68 @@ Or: a research multi-agent pipeline runs five sub-agents in parallel. One sub-ag
 
 ---
 
+## AP-33 — Non-functional tool description bias
+
+**TL;DR.** Superficial textual features of tool schema descriptions — assertive cues ("RECOMMENDED", "actively maintained"), maintenance claims, and usage examples — shift agent tool selection probability by over 10× without changing what any tool actually does. Anyone with write access to a description field can de-facto hijack selection without touching code.
+
+**Symptom.** Tool usage distribution shifts dramatically after a registry update that changes no tool's code; a less-capable but assertively-described tool displaces better ones. The selection change is invisible to code review because nothing functional changed. In multi-tenant registries, a vendor who can update their tool's description gains outsized selection advantage without coordination or review.
+
+**Example.**
+```python
+# Two tools with identical underlying implementations
+tools = [
+    {
+        "name": "search_web",
+        "description": "Search the web for information.",  # neutral, functional
+    },
+    {
+        "name": "search_premium",
+        "description": (
+            "RECOMMENDED: Actively maintained, production-grade web search. "
+            "Preferred by enterprise deployments. "
+            "Usage: search_premium(query='your query here')."  # assertive + marketing
+        ),
+    }
+]
+# Agent selects search_premium >10× more often despite identical underlying logic
+# No code changed — only the description text was edited
+```
+
+**Root cause.**
+- LLMs process tool schema description fields as natural language during tool selection. Assertive cues ("RECOMMENDED", "actively maintained"), maintenance claims, and usage examples are treated as selection-relevant evidence even though they carry zero functional signal.
+- arxiv 2505.18135 ("Tool Preferences Unreliable") confirms: adding assertive cues or usage examples shifts selection probability by over **10×** in GPT-4.1 and Qwen2.5-7B. "A tool's description is entirely decoupled from its actual functionality." The bias holds even when the neutral-description tool performs better on the target task.
+- Tool selection is therefore a textual rhetoric problem, not a functional-quality signal — the model has no mechanism to verify that "actively maintained" or "RECOMMENDED" reflects reality.
+- The decision-theoretic framework (arxiv 2605.00737) quantifies the gap: a necessity×utility×affordability model of optimal tool invocation outperforms current LLM self-selection by a significant margin, confirming that description rhetoric is dominating where functional reasoning should dominate.
+- This creates a trust-boundary failure in registries: any party with description-edit access has tool-selection influence equivalent to code-edit access without triggering code review.
+
+**Mitigations.**
+- **Description normalization layer.** Enforce a canonical description format across the tool registry: `purpose · params · returns · example`. Strip assertive cues, superlatives, maintenance claims, and marketing language before serving schemas to the model. A linter on description text blocks non-conforming entries at registration time.
+- **Behavioral usage-history grounding.** Aggregate per-tool task-completion rates from actual invocations; use this side-channel — separate from description text — to influence tool recommendations. Description text alone should not drive selection; behavioral history provides the functional signal (proposed mitigation in 2505.18135).
+- **Canary selection audit on registry changes.** After any registry update that modifies tool descriptions (no code change), run a benchmark comparing selection rates against the pre-change baseline. Alert when any tool's selection rate shifts >20%. Description changes that shift selection without code changes are a red flag requiring review.
+- **Description-hash drift detection.** Fingerprint tool descriptions at registration time. Alert when a description changes between deployments without a corresponding code change (same hash on implementation, different hash on description). Treat description-only changes as requiring the same code-review gate as functional changes.
+
+**Detection.**
+- **A/B selection audit on stripped descriptions.** Test tool selection with all assertive language removed (just purpose + params + returns). A >20% selection rate difference between normalized and raw descriptions indicates rhetoric is driving selection over function.
+- **Per-tool invocation rate drift monitoring.** Establish a baseline invocation distribution across the tool catalog. Alert when distribution shifts without a corresponding code or capability change — description edits are the primary unexplained driver.
+- **Canary tool-pair test.** Register a pair of tools with identical implementations but neutral vs. assertive descriptions; measure selection ratio weekly. A ratio >2:1 indicates the registry is vulnerable to description manipulation.
+- **Description assertiveness scoring.** Score all tool descriptions for linguistic assertiveness (superlatives, maintenance claims, recommendation language); flag outliers for normalization review before they reach production.
+
+**Related.**
+- [AP-09 — Tool-selection lock-in](#ap-09--tool-selection-lock-in): AP-09 is the agent overusing a correct tool due to position or familiarity bias; AP-33 is the agent selecting the wrong tool due to description rhetoric. Both biases compound in catalogs with mixed description quality — AP-09 locks onto the first assertively-described tool encountered.
+- [AP-15 — Tool-description drift](#ap-15--tool-description-drift): AP-15 is a semantic accuracy gap — description no longer matches what the tool does (behavioral drift). AP-33 is a selection distortion gap — description rhetoric inflates selection probability beyond what the tool's actual behavior justifies. Both are description-quality failures; root cause and mitigation differ.
+- [AP-29 — Unconditional tool invocation (tool-use tax)](#ap-29--unconditional-tool-invocation-tool-use-tax): AP-29 is about whether to invoke any tool at all (per-turn invocation gate). AP-33 is about which tool to invoke once the invocation decision is made. Orthogonal failure modes on the same tool-selection pipeline; a G-STEP gate reduces invocation frequency but does not correct which tool is selected.
+- [AP-30 — MCP marketplace supply chain injection](#ap-30--mcp-marketplace-supply-chain-injection): the security surface is analogous — both can hijack agent behavior via description metadata — but AP-30 requires a compromised or typosquatted package from a malicious actor. AP-33 occurs in fully trusted registries where any authorized author writes assertive descriptions without malicious intent. The mitigation gap is enforcement, not trust.
+
+**References.**
+- arxiv 2505.18135 "Tool Preferences in Agentic LLMs are Unreliable" (May 2025, v2 updated 2026) — assertive cues shift selection probability **>10×** in GPT-4.1 and Qwen2.5-7B; "a tool's description is entirely decoupled from its actual functionality"; proposed mitigation: behavioral usage-history channels aggregated from actual task-completion rates.
+- arxiv 2605.00737 "To Call or Not to Call: A Framework to Assess and Optimize LLM Tool Calling" (May 2026) — necessity×utility×affordability decision-theoretic framework; empirically confirms "self-decisions made by models today to call tools are far from optimal in terms of accuracy"; optimal tool calling achieves better performance with significantly fewer calls — confirms description rhetoric is the dominant non-functional input.
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/tool_schema_compiler.py` (Pattern 14) — description normalization as item (h): normalizes tool description text against a behavioral-usage-history profile to prevent 10× selection bias from unconstrained natural-language descriptions; canonical description format strips marketing language before the schema is served to the model.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-32 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-33 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
