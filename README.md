@@ -71,7 +71,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - **Reasoning / planning** — [AP-03](#ap-03--hallucinated-tool-calls) · [AP-06](#ap-06--semantic-goal-drift-on-long-chains) · [AP-09](#ap-09--tool-selection-lock-in) · [AP-10](#ap-10--confidence-inflation-on-self-verification) · [AP-13](#ap-13--planner--executor-divergence) · [AP-19](#ap-19--spec-drift-on-rigid-agent-specs) · [AP-33](#ap-33--non-functional-tool-description-bias)
 - **Action / egress** — [AP-02](#ap-02--runaway-tool-use-loop) · [AP-04](#ap-04--destructive-action-without-confirmation) · [AP-11](#ap-11--exfiltration-via-agent-initiated-fetch) · [AP-14](#ap-14--silent-retry-masking-failure) · [AP-23](#ap-23--tool-call-argument-injection) · [AP-28](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success) · [AP-29](#ap-29--unconditional-tool-invocation-tool-use-tax)
 - **State / memory** — [AP-05](#ap-05--context-bloat--cost-explosion) · [AP-08](#ap-08--memory-poisoning) · [AP-22](#ap-22--context-pollution-from-raw-tool-output) · [AP-24](#ap-24--memory-write-path-accumulation) · [AP-32](#ap-32--flat-multi-agent-memory-absent-memory-scope-isolation) · [AP-34](#ap-34--cross-session-slow-drip-memory-injection) · [AP-37](#ap-37--overconfident-single-belief-memory-commit-under-partial-observability)
-- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility) · [AP-26](#ap-26--sub-agent-credential-scope-overflow) · [AP-27](#ap-27--multi-agent-concurrent-state-corruption) · [AP-31](#ap-31--hallucinated-multi-agent-consensus) · [AP-35](#ap-35--long-horizon-tool-attack-chain-sequential-stealth-exploitation) · [AP-36](#ap-36--agent-capacity-overload-cascade-absent-backpressure-primitives)
+- **System / lifecycle** — [AP-07](#ap-07--silent-regression-on-model-swap) · [AP-12](#ap-12--agent-to-agent-injection) · [AP-18](#ap-18--autonomy-creep) · [AP-20](#ap-20--multi-agent-vertical-domain-failure) · [AP-21](#ap-21--long-horizon-agent-state-collapse) · [AP-25](#ap-25--tool-schema-wire-format-incompatibility) · [AP-26](#ap-26--sub-agent-credential-scope-overflow) · [AP-27](#ap-27--multi-agent-concurrent-state-corruption) · [AP-31](#ap-31--hallucinated-multi-agent-consensus) · [AP-35](#ap-35--long-horizon-tool-attack-chain-sequential-stealth-exploitation) · [AP-36](#ap-36--agent-capacity-overload-cascade-absent-backpressure-primitives) · [AP-38](#ap-38--gradual-constraint-adherence-decay-under-accumulated-structural-requirements)
 
 | # | Anti-pattern | One-line |
 |---|---|---|
@@ -112,6 +112,7 @@ Contribute via the template in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 | AP-35 | [Long-horizon tool-attack chain (sequential stealth exploitation)](#ap-35--long-horizon-tool-attack-chain-sequential-stealth-exploitation) | A multi-step adversarial sequence distributes its attack payload across N tool outputs — each individually passes per-step safety checks — so the cumulative trajectory achieves privilege escalation, data exfiltration, or policy override that no single-step analysis detects; agents with no path-state tracker let sequential tool-attack chains succeed at 100% while shadow-memory trajectory tracking reduces that to 8.3% |
 | AP-36 | [Agent capacity overload cascade (absent backpressure primitives)](#ap-36--agent-capacity-overload-cascade-absent-backpressure-primitives) | Multi-agent systems have no standard mechanism for a downstream agent to declare saturation; upstream callers interpret slow responses as timeouts and retry at full rate; each retry compounds load on the already-saturated agent, collapsing the entire agent graph from one bottleneck in a retry storm that costs superlinearly and never self-resolves |
 | AP-37 | [Overconfident single-belief memory commit (under partial observability)](#ap-37--overconfident-single-belief-memory-commit-under-partial-observability) | Under partial observability agents commit exactly one definite conclusion per observation with no uncertainty channel; ambiguous observations are resolved prematurely into overconfident beliefs that reinforce themselves on retrieval, causing active decision-relevant accuracy to collapse to 40–60% even when passive recall measures 90%+ |
+| AP-38 | [Gradual constraint adherence decay under accumulated structural requirements](#ap-38--gradual-constraint-adherence-decay-under-accumulated-structural-requirements) | As structural requirements accumulate across a task, agent adherence to earlier constraints degrades silently and progressively — the agent finishes within budget and step count while violating 2–3 of 5 original requirements; no loop counter fires (progress continues), no cost alarm fires (spend is normal), and the agent returns "success" — decay is visible only in output constraint validation |
 
 ---
 
@@ -881,6 +882,7 @@ A short checklist for reviewing a PR that adds or changes agent behaviour. Pick 
 - AP-32 — (multi-agent only) does every memory write carry an `agent_id` + `scope` tag? Is there an explicit "promote to shared" step before a sub-agent's write becomes institutional state? Can a misbehaving sub-agent's writes be enumerated and revoked without touching other agents' entries?
 - AP-34 — does every memory write carry a `source_attribution` + `session_id` tag? Is there a per-source contribution ceiling (e.g., >15 writes from the same non-orchestrator source triggers review)? Is semantic drift from a trusted policy-baseline snapshot monitored periodically? Are credentials short-lived enough that a credential rotation resets the accumulation window?
 - AP-37 — does the write path store a single definite conclusion per observation, or a distribution of candidates with confidence weights? When contradictory evidence arrives, is the existing belief updated (Noisy-OR) rather than silently overwritten or ignored? Do memory retrievals surface a confidence score and observation count alongside the value so downstream planning steps can trigger clarification when confidence is low?
+- AP-38 — is there a running constraint adherence score tracking per-step compliance with all original structural requirements, or only a final output check? When adherence drops below a threshold mid-task, does the agent receive a constraint restate injection rather than continuing silently? Are tasks with >5 structural constraints split into sub-tasks of ≤3 constraints to stay below the empirical high-decay-risk threshold? Does the compliance gate evaluate `(agent_id, partial_path, proposed_action, constraint_set)` rather than only a per-step check?
 
 If a PR doesn't change the agent's authority or its inputs, no anti-pattern review is needed — feature changes inside the agent's existing privilege band stay routine.
 
@@ -1857,9 +1859,71 @@ BeliefMem (arxiv 2605.05583) demonstrates this directly: with standard single-co
 
 ---
 
+## AP-38 — Gradual constraint adherence decay under accumulated structural requirements
+
+**TL;DR.** As structural requirements accumulate across a task, agent adherence to earlier constraints degrades silently and progressively. The agent finishes within budget and step count while violating 2–3 of 5 original requirements; no loop counter fires because progress continues; no cost alarm fires because spend is normal; the agent returns "success." Decay is visible only in output constraint validation — the one check most pipelines skip.
+
+**Symptom.**
+- The agent successfully completes the task by token and step count but the final output violates 2–3 constraints that were explicitly stated at the start.
+- Violations follow a recency pattern: the first 1–2 requirements in the list are satisfied (they dominated early steps); requirements stated later or introduced mid-task are the ones dropped.
+- Re-running the agent with the same prompt and the same constraints does not fix the decay — it re-emerges at different constraints each time, confirming the failure mode is structural, not a one-time hallucination.
+- Adding more constraints to the prompt accelerates the decay: each new constraint partially displaces attention from earlier ones.
+- The agent's intermediate outputs look reasonable at each step; the violations become clear only when the final output is validated against the original specification.
+
+**Example.**
+```python
+constraints = [
+    "use only stdlib (no third-party deps)",      # constraint 1
+    "all public functions must have docstrings",   # constraint 2
+    "max line length 79 chars",                    # constraint 3
+    "no global mutable state",                     # constraint 4
+    "return Result type, not raise exceptions",    # constraint 5
+]
+
+# Agent given all 5 constraints at task start.
+# Step 1-3: agent respects all 5 constraints.
+# Step 4-6: agent introduces a helper that raises ValueError (violates 5),
+#           a global cache dict (violates 4), and a 93-char line (violates 3).
+# Step 7 (final): agent returns the code marked as complete.
+# Each individual step looked like forward progress; no circuit breaker fired.
+# Constraint 1 and 2 are satisfied. Constraints 3, 4, 5 are not.
+```
+
+Constraint Decay (arxiv 2605.06445) demonstrates this empirically: as structural requirements accumulate in backend code generation, agent performance "exhibits a substantial decline" against earlier constraints while standard circuit breakers — `max_iterations`, cost ceilings — fire on none of the trials because the agent makes genuine forward progress at each step. Runtime Governance (arxiv 2603.16586) confirms the design implication: compliance gates must be functions of the full `(agent_id, partial_path, proposed_action, state)` tuple, not atomic per-step checks; a constraint-adherence score is the natural policy input for path-based decay detection.
+
+**Root cause.**
+- No mechanism tracks constraint adherence across steps; each step's output is assessed locally for correctness, not against the full requirement set from step 1.
+- LLM attention is finite: as generation length grows and new constraints are stated mid-task, earlier constraints in the specification compete with growing in-context output for attention weight, and lose.
+- Circuit breakers are triggered by observable anomalies (loop count, token spend, null tool returns); gradual adherence decay produces none of these signals — spend is normal, steps are finite, outputs look reasonable locally.
+- Constraint cardinality directly predicts decay risk: models exhibit near-zero decay at ≤3 concurrent structural constraints and substantial decline at ≥6 (2605.06445 empirical finding); current pipelines apply no constraint count budgeting.
+
+**Mitigations.**
+1. **Running constraint adherence score (no-progress detector second dimension).** Track a per-step adherence score against the full original constraint set — not just "did the agent make progress?" but "does the output so far still satisfy constraint N?". Wire this as a second dimension alongside cost entropy in the no-progress detector (AgentGuard Pattern 12). When the adherence score drops >20% from baseline, trigger mitigation 2 before the next step.
+2. **Mid-task constraint restate injection.** When adherence drops below threshold, inject a summarized constraint reminder at the top of the next turn's context: `"REMINDER: you must still satisfy: (3) max 79 chars, (4) no global state, (5) return Result not raise."` This is cheaper than a full restart and empirically recovers adherence on constraints that were still satisfiable at the point of injection.
+3. **Constraint cardinality budgeting.** Cap each agent sub-task at ≤3 concurrent structural constraints. When a task specification exceeds 5 constraints, decompose into sub-tasks of ≤3 constraints each with explicit handoff postconditions that validate adherence before the next sub-task starts. This stays below the empirical high-decay-risk threshold in 2605.06445.
+4. **Path-based adherence policy gate.** Implement the compliance gate as `check_adherence(agent_id, partial_path, proposed_action, constraint_set) → (pass, violated_constraints)` rather than `check_step(output)`. Evaluate the proposed next step's contribution to constraint adherence before execution, not after; a step that would produce output violating constraint 3 is rejected pre-execution, not post-execution.
+
+**Detection.**
+- **Constraint violation count time series.** Count constraint violations per step across the task trajectory. A monotonically increasing count with no recovery steps is the canonical decay signature — violations accumulate rather than being corrected.
+- **Structural adherence delta (first-K vs. last-K output steps).** Compare constraint violation rates in the first third of task steps versus the last third. A >15-point increase confirms progressive decay as opposed to a one-time early failure.
+- **Constraint count correlation.** Run the same task class with N=2, 4, 6, 8 simultaneous constraints. If final-output constraint satisfaction rates decline monotonically with N, the agent is exhibiting structural decay; increasing model temperature or prompt length will not fix it — decomposition and cardinality budgeting are required.
+- **Canary constraint.** Inject a simple, inexpensive-to-validate constraint ("include the string `# VERIFIED` as a comment in the first function") alongside real constraints. If the canary constraint is lost in final output, the decay is generalized — the agent is dropping constraints systematically, not just complex ones.
+
+**Related.**
+- [AP-06 — Semantic goal drift on long chains](#ap-06--semantic-goal-drift-on-long-chains): AP-06 is about the agent's *goal* shifting — the agent starts solving a different problem. AP-38 agents know their goal; the structural specification for achieving it is what they stop satisfying while the goal remains fixed.
+- [AP-21 — Long-horizon agent state collapse](#ap-21--long-horizon-agent-state-collapse): AP-21 is about session-length or time-driven incoherence over hours or days. AP-38 occurs within a single task over tens of steps — shorter duration, same decay mechanism but driven by constraint cardinality rather than time.
+- [AP-28 — Agent runaway budget burn and silent tool-call success](#ap-28--agent-runaway-budget-burn-and-silent-tool-call-success): AP-28 involves cost anomalies (847 API calls for a weather query, $437 overnight) and tool-call null returns that are measurable. AP-38 produces normal spend, normal step count, and a "success" return — caught only by output constraint validation, which AP-28's circuit breakers do not perform.
+
+**References.**
+- arxiv 2605.06445 "Constraint Decay: The Fragility of LLM Agents in Backend Code Generation" (May 7, 2026) — as structural requirements accumulate, agent performance "exhibits a substantial decline"; standard circuit breakers (max_iterations, cost ceilings) miss this failure mode entirely because the agent makes incremental forward progress at each step; constraint cardinality is the primary predictor of decay risk. ([arxiv](https://arxiv.org/abs/2605.06445))
+- arxiv 2603.16586 "Runtime Governance for AI Agents: Policies on Paths" (March 2026) — "non-deterministic, path-dependent behavior that cannot be fully governed at design time"; compliance gates must be functions of `(agent_id, partial_path, proposed_action, state)`, not atomic per-step checks; the constraint-adherence score is the natural policy input for path-based decay detection. ([arxiv](https://arxiv.org/abs/2603.16586))
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/agent_guard.py` (Pattern 12) — `NoProgressDetector` with output-schema delta and tool-call entropy monitoring; constraint-adherence score is a natural second dimension alongside cost entropy for the same detector; path-based policy gate `check_policy(agent_id, partial_path, action, state)` directly implements mitigation 4.
+
+---
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-37 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-38 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
