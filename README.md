@@ -2248,9 +2248,50 @@ GitHub openai-agents-python#2868 (April 9, 2026) documents the production need e
 - arxiv 2604.16706 "Evaluating Tool-Using Language Agents: Judge Reliability, Propagation Cascades, and Runtime Mitigation in AgentProp-Bench" (April 17, 2026) — rejection and recovery are independent model capabilities (Spearman rho=0.126, p=0.747); confirms that binary tool blocking cannot substitute for structured per-call authorization with context-sensitive verdicts — combined pre-execution authorization + post-execution recovery is the correct layered architecture. ([arxiv](https://arxiv.org/abs/2604.16706))
 - [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/agent_guard.py` (Pattern 12) — `AgentGuard` runtime guard middleware; mitigation 1 (authorization middleware with structured verdicts) extends the `ToolCallGuard` pre-execution hook with ALLOW/DENY/MODIFY/DEFER/STEP_UP verdict types; mitigation 2 (per-call scope injection) maps to the `DelegationScope` dataclass added to the hook context.
 
+## AP-44 — Expert-blind team averaging (expertise dilution under integrative compromise)
+
+**TL;DR.** Multi-agent LLM teams consistently perform worse than their best single member — up to 37.6% capability loss — because no coordination primitive exists to route final decisions to the most capable agent for each subtask type. Teams default to averaging, majority-voting, or sequential delegation that dilutes specialist knowledge rather than amplifying it.
+
+**Symptom.** Team output quality on specialized subtasks (code generation, mathematical reasoning, domain-specific queries) regresses toward the median agent capability. Individual agents queried alone on the same subtask outperform the team's collective answer by 20–37%. No observable error fires: the team completes the task, returns a confident answer, and exits normally.
+
+**Example.** An orchestrator delegates a Python performance optimization task to three agents. All three produce answers; the orchestrator majority-votes on the most common approach. The correct optimization (numpy vectorization) was produced only by Agent-2 but overruled by the two-agent majority that suggested a slower loop-based approach. Agent-2 queried alone would have answered correctly. No log entry records that expert knowledge was overruled.
+
+**Root cause.**
+- Agent selection is round-robin, random, or role-labeled at initialization — capability is not tracked or updated at runtime based on observed task-type performance.
+- Majority-voting and averaging mechanisms treat all agents as equally capable for any subtask, regardless of historical performance data available within the session.
+- No "expertise routing" primitive exists that can consult a per-agent capability profile before assigning decision authority or weighting contributions.
+- Dissenting minority expert opinions are suppressed by design in consensus-seeking coordination protocols — the minority signal that would identify the right answer is discarded.
+- The integrative compression loss (up to 37.6%) is indistinguishable from a normal agent answer in the output — there is no observable signal that team capability has been degraded by the integration mechanism.
+
+**Mitigations.**
+1. **Per-agent task-type performance tracking.** Maintain a lightweight capability profile for each agent: `{agent_id: {task_type: (success_count, total_count, ema_score)}}`. Update after each evaluated subtask. Route decision authority on future subtasks toward the highest-scoring agent for that type.
+2. **Expertise-weighted voting.** Replace unweighted majority voting with weighted voting where each agent's vote is scaled by its historical success rate on the current task type. Agents with no track record default to uniform weight; specialists' scores override the mean.
+3. **Dissent-preservation protocol.** Before consensus is computed, the orchestrator explicitly surfaces the highest-scoring minority opinion alongside the majority position. On high-stakes decisions, minority recommendations escalate to human review rather than being silently discarded.
+4. **Dynamic role assignment via DriftMonitor.** Use semantic divergence signals (DriftMonitor-class cosine distance across agents) to detect when a team is converging on a mediocre consensus vs. genuine agreement. Large-spread distribution on a difficult subtask is the signal to route to the highest-confidence agent rather than averaging.
+
+**Detection.**
+- **Team vs. best-member accuracy delta.** Sample team decisions and measure accuracy when the same query is sent to each agent independently. A persistent delta >5% is the integrative compression signature from 2602.01011.
+- **Expert-suppression rate.** Track how often the highest-scoring agent for a task type is not the one whose recommendation was accepted in the final output. A rate >30% on evaluated tasks indicates expert knowledge is being systematically diluted.
+- **Capability profile staleness.** If the per-agent performance profile has not been updated across N consecutive tasks, the routing mechanism is non-functional — teams are operating on initialization-time role labels rather than runtime performance data.
+- **Fast consensus on difficult subtasks.** First-round unanimous agreement on novel, hard subtasks is a red flag: it typically indicates convergence on the "safe" median answer rather than independent reasoning from each agent.
+
+**Related.**
+- [AP-27 — Multi-agent concurrent state corruption](#ap-27--multi-agent-concurrent-state-corruption): AP-27 is physical write conflicts on shared artifacts. AP-44 is quality degradation in the final integrated answer — no lock violation, no exception, no detectable write conflict.
+- [AP-31 — Hallucinated multi-agent consensus](#ap-31--hallucinated-multi-agent-consensus): AP-31 is false verbal agreement without state commitment. AP-44 is real agreement on a suboptimal answer — agents have genuinely converged, but on the wrong one.
+- [AP-36 — Agent capacity overload cascade (absent backpressure primitives)](#ap-36--agent-capacity-overload-cascade-absent-backpressure-primitives): AP-36 is throughput collapse under saturation. AP-44 is quality collapse under normal load — the team is running fine, just poorly.
+- [AP-42 — Multi-agent failure attribution blackout](#ap-42--multi-agent-failure-attribution-blackout): AP-42 is the inability to identify which agent caused a failure after it happens. AP-44 is the inability to route to the correct expert before a subtask is assigned — a pre-task routing gap vs. a post-failure diagnostic gap.
+
+**References.**
+- arxiv 2602.01011 "Multi-Agent Teams Hold Experts Back" (February 2026) — LLM teams lose up to **37.6%** vs. their best individual member due to "integrative compromise"; no mechanism exists to dynamically weight agent expertise without manual orchestration; confirms integrative compression is a structural coordination failure, not a model capability failure. ([arxiv](https://arxiv.org/abs/2602.01011))
+- arxiv 2604.16339 "Semantic Consensus: Process-Aware Conflict Detection and Resolution for Enterprise Multi-Agent LLM Systems" (April 2026) — 79% of multi-agent failures stem from specification and coordination issues; Semantic Consensus Framework achieves 100% workflow completion where natural-language-coordination baselines fail; confirms expertise routing is a coordination layer problem independent of base model capability. ([arxiv](https://arxiv.org/abs/2604.16339))
+- arxiv 2601.04170 "Agent Drift: Quantifying Behavioral Degradation in Multi-Agent LLM Systems" — inter-agent misalignment accounts for 36.9% of all observed failure modes; production failure rates 41–86.7%; token duplication 53–86% across major frameworks; confirms multi-agent quality degradation is a recurring cross-framework problem. ([arxiv](https://arxiv.org/abs/2601.04170))
+- arxiv 2503.13657 "Why Do Multi-Agent LLM Systems Fail?" (MAST study, February 2026) — 1,642 execution traces across 7 open-source frameworks; "most failures originate at system boundaries rather than within individual model calls"; hallucinated consensus and expertise-suppression share the same root coordination gap; confirms expert-blind averaging is a systemic cross-framework failure mode. ([arxiv](https://arxiv.org/abs/2503.13657))
+- [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/agent_coord.py` (Pattern 11) — `DriftMonitor` component provides the semantic divergence signal needed for mitigation 4: cosine distance across agent intent embeddings fires `on_drift` when team divergence exceeds threshold, distinguishing genuine disagreement (route to specialist) from mediocre consensus (averaging artifact).
+
+
 ## Roadmap
 
-The original 14-entry roadmap plus AP-15..AP-43 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
+The original 14-entry roadmap plus AP-15..AP-44 are shipped. Future entries are demand-driven (PRs welcome) — open an issue with a candidate failure mode + a real incident or reproduction.
 
 ---
 
