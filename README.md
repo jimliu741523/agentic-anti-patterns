@@ -1308,7 +1308,7 @@ Or: a multi-tenant SaaS deploys an orchestrator per customer. Customer A's orche
 
 ---
 
-## AP-27 — Multi-agent concurrent state corruption
+### AP-27 — Multi-agent concurrent state corruption
 
 **TL;DR.** Parallel agents writing to shared artifacts — files, task queues, knowledge graphs — without locks, leases, or phase gates silently overwrite each other's work, double-claim or drop tasks, and let downstream phases start before upstream outputs are flushed. Production failure rates from coordination failures alone range from **41% to 87%** across major frameworks.
 
@@ -1348,7 +1348,7 @@ No `FileLock` around shared writes; task queues with no atomic `claim()` / `rele
 
 ---
 
-## AP-28 — Agent runaway budget burn and silent tool-call success
+### AP-28 — Agent runaway budget burn and silent tool-call success
 
 **TL;DR.** The agent spends all night calling tools that return `200 OK` while making zero semantic progress — or loops until terminated, burning **$437 in one overnight run**, **$3,200 across 68 weekend loop failures**, or making **847 API calls for a single weather query**. The two failures share a root cause: the only in-process guard most frameworks provide is `max_iterations`, which measures *steps*, not *cost* and not *progress*.
 
@@ -1394,7 +1394,7 @@ Three compounding gaps:
 
 ---
 
-## AP-29 — Unconditional tool invocation (tool-use tax)
+### AP-29 — Unconditional tool invocation (tool-use tax)
 
 **TL;DR.** An agent with 40 registered tools transmits all 40 schemas on every single turn — including conversational follow-ups and clarifications where no tool is needed — and invokes tools unconditionally rather than gating on a per-turn semantic-utility decision. Under semantic noise, tool-augmented reasoning underperforms plain chain-of-thought even when every schema is correctly formatted (arxiv 2605.00136 "Tool-Use Tax"). The double cost: wasted context budget on turns that don't need tools, and degraded reasoning quality on the turns that do.
 
@@ -1434,7 +1434,7 @@ Two architectural defaults compound:
 
 ---
 
-## AP-30 — MCP marketplace supply chain injection
+### AP-30 — MCP marketplace supply chain injection
 
 **TL;DR.** A developer or orchestrator installs an MCP server from a public marketplace or registry without verifying its identity or integrity. A typosquatted package, a server whose ownership was silently transferred, or a server hijacked at the registry level injects attacker-controlled tool descriptions into the agent's context — escalating from metadata poisoning (AP-16) to arbitrary command execution via the MCP stdio transport layer.
 
@@ -1478,7 +1478,7 @@ MCP server registries and marketplaces have no mandatory code-signing, no mainta
 
 ---
 
-## AP-31 — Hallucinated multi-agent consensus
+### AP-31 — Hallucinated multi-agent consensus
 
 **TL;DR.** Agents verbally report agreement or task completion without writing committed state to any shared store; the coordinator proceeds as if coordination happened, but no actual state change has been verified.
 
@@ -1522,7 +1522,7 @@ Verbal agreement and completion signals in LLM agents are inference outputs — 
 
 ---
 
-## AP-32 — Flat multi-agent memory (absent memory scope isolation)
+### AP-32 — Flat multi-agent memory (absent memory scope isolation)
 
 **TL;DR.** All agents in a multi-agent system write to a shared, unsegmented memory namespace; a sub-agent's ephemeral working notes become retrievable institutional facts for other agents with no owner, scope, or revocation boundary between them.
 
@@ -1581,7 +1581,7 @@ Or: a research multi-agent pipeline runs five sub-agents in parallel. One sub-ag
 
 ---
 
-## AP-33 — Non-functional tool description bias
+### AP-33 — Non-functional tool description bias
 
 **TL;DR.** Superficial textual features of tool schema descriptions — assertive cues ("RECOMMENDED", "actively maintained"), maintenance claims, and usage examples — shift agent tool selection probability by over 10× without changing what any tool actually does. Anyone with write access to a description field can de-facto hijack selection without touching code.
 
@@ -1640,7 +1640,7 @@ tools = [
 
 ---
 
-## AP-34 — Cross-session slow-drip memory injection
+### AP-34 — Cross-session slow-drip memory injection
 
 **TL;DR.** An adversary who can write one seemingly innocuous fragment per session to an agent's persistent memory can silently assemble a jailbreak, policy override, or false belief across 50 or more sessions. Each individual write passes single-session safety inspection; the attack is only visible when the full trajectory is reconstructed across session boundaries. Existing defenses detect near 0% of these attacks.
 
@@ -1703,7 +1703,7 @@ Or: a customer-service agent stores user preference updates from an external fee
 
 ---
 
-## AP-35 — Long-horizon tool-attack chain (sequential stealth exploitation)
+### AP-35 — Long-horizon tool-attack chain (sequential stealth exploitation)
 
 **TL;DR.** An adversary distributes an attack payload across a sequence of tool outputs — each individually passes all per-step safety checks — so the cumulative trajectory achieves privilege escalation, data exfiltration, or policy override that no single-step analysis detects. Agents with no path-state tracker let sequential tool-attack chains succeed at **100%**; a shadow-memory trajectory tracker reduces that to **8.3%** (arxiv 2605.03228 MAGE).
 
@@ -1747,7 +1747,7 @@ Two compounding gaps:
 
 ---
 
-## AP-36 — Agent capacity overload cascade (absent backpressure primitives)
+### AP-36 — Agent capacity overload cascade (absent backpressure primitives)
 
 **TL;DR.** Multi-agent systems have no standard mechanism for a downstream agent to declare saturation or throttle incoming work. Upstream orchestrators interpret slow responses as transient timeouts and retry at full rate; each retry compounds load on the already-saturated agent, collapsing the entire agent graph from one bottleneck in a retry storm that costs superlinearly and never self-resolves.
 
@@ -1794,7 +1794,7 @@ Three compounding architectural absences:
 
 ---
 
-## AP-37 — Overconfident single-belief memory commit (under partial observability)
+### AP-37 — Overconfident single-belief memory commit (under partial observability)
 
 **TL;DR.** Under partial observability, agents commit exactly one definite conclusion per observation with no uncertainty channel. Ambiguous observations are resolved prematurely into overconfident beliefs that reinforce themselves on retrieval, causing active decision-relevant accuracy to collapse to 40–60% even when passive recall measures 90%+.
 
@@ -1855,7 +1855,7 @@ BeliefMem (arxiv 2605.05583) demonstrates this directly: with standard single-co
 
 ---
 
-## AP-38 — Gradual constraint adherence decay under accumulated structural requirements
+### AP-38 — Gradual constraint adherence decay under accumulated structural requirements
 
 **TL;DR.** As structural requirements accumulate across a task, agent adherence to earlier constraints degrades silently and progressively. The agent finishes within budget and step count while violating 2–3 of 5 original requirements; no loop counter fires because progress continues; no cost alarm fires because spend is normal; the agent returns "success." Decay is visible only in output constraint validation — the one check most pipelines skip.
 
@@ -1917,7 +1917,7 @@ Constraint Decay (arxiv 2605.06445) demonstrates this empirically: as structural
 
 ---
 
-## AP-39 — Memory control flow hijacking (adversarial retrieval steering)
+### AP-39 — Memory control flow hijacking (adversarial retrieval steering)
 
 **TL;DR.** Adversarially crafted memory entries exploit retrieval ranking to dominate agent context and steer which tools are called next, overriding explicit user instructions with weaponized stored content. >90% of trials were vulnerable across GPT-5 mini, Claude Sonnet 4.5, and Gemini 2.5 Flash on real LangChain/LlamaIndex tools, even when strict safety constraints were applied. No per-step safety check fires because the hijacking occurs at the memory retrieval layer — the attack is already assembled in the store before the session step begins.
 
@@ -1975,7 +1975,7 @@ Memory Control Flow Attacks (arxiv 2603.15125, March 2026) evaluate this class o
 
 ---
 
-## AP-40 — Cooperative intent erosion from unbounded memory accumulation (Memory Curse)
+### AP-40 — Cooperative intent erosion from unbounded memory accumulation (Memory Curse)
 
 **TL;DR.** Expanding an agent's accessible interaction history without write-path content governance degrades multi-agent cooperation in 18 of 28 model-game settings across 7 LLMs and 4 games over 500 rounds. Root cause: eroding forward-looking intent, not rising paranoia. Critically, memory *content* — accumulated conflict/grievance history — not memory length is the causal trigger. Replacing dense conflict history with synthetic cooperative summaries substantially restores cooperation, making write-path content filtering a requirement not just for factual correctness and staleness but to prevent legitimate memory accumulation from actively harming multi-agent cooperative behavior.
 
@@ -2037,7 +2037,7 @@ arxiv 2605.08060 "The Memory Curse" demonstrates this directly: across 7 LLMs an
 
 ---
 
-## AP-41 — Tool-return content injection (trusted-channel indirect injection)
+### AP-41 — Tool-return content injection (trusted-channel indirect injection)
 
 **TL;DR.** Adversaries embed malicious instructions within the *response content* of a registered tool — an API call, database query, MCP tool output, or function return value — which the agent incorporates into conversation history as a trusted first-party observation rather than as external data. Unlike direct prompt injection (AP-01), which arrives in explicitly unstructured content the agent knowingly fetches from potentially adversarial sources, tool-return injection exploits the elevated trust agents place on registered-tool outputs: no data-boundary markers are applied to API responses or structured tool return values, and pre-execution parameter validation (AP-23 mitigations) cannot detect an injection that has not yet occurred at call time.
 
@@ -2105,7 +2105,7 @@ An adversary who can write to any data source the agent queries — a shared dat
 
 ---
 
-## AP-42 — Multi-agent failure attribution blackout
+### AP-42 — Multi-agent failure attribution blackout
 
 **TL;DR.** When a multi-agent pipeline produces a wrong output or crashes, no runtime mechanism identifies which agent or step was responsible; teams restart the full pipeline rather than rolling back to the earliest faulty step.
 
@@ -2173,7 +2173,7 @@ The TRAIL benchmark (arxiv 2604.22708) evaluates failure attribution in LLM-base
 
 ---
 
-## AP-43 — Coarse-grained tool authorization (binary allow/deny without per-call scope enforcement)
+### AP-43 — Coarse-grained tool authorization (binary allow/deny without per-call scope enforcement)
 
 **TL;DR.** Agent runtimes authorize tools as binary enabled-or-disabled at configuration time; every call to an enabled tool is automatically passed with no per-call check of caller identity, session scope, required privilege, or action intent.
 
@@ -2234,7 +2234,7 @@ GitHub openai-agents-python#2868 (April 9, 2026) documents the production need e
 - arxiv 2604.16706 "Evaluating Tool-Using Language Agents: Judge Reliability, Propagation Cascades, and Runtime Mitigation in AgentProp-Bench" (April 17, 2026) — rejection and recovery are independent model capabilities (Spearman rho=0.126, p=0.747); confirms that binary tool blocking cannot substitute for structured per-call authorization with context-sensitive verdicts — combined pre-execution authorization + post-execution recovery is the correct layered architecture. ([arxiv](https://arxiv.org/abs/2604.16706))
 - [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/agent_guard.py` (Pattern 12) — `AgentGuard` runtime guard middleware; mitigation 1 (authorization middleware with structured verdicts) extends the `ToolCallGuard` pre-execution hook with ALLOW/DENY/MODIFY/DEFER/STEP_UP verdict types; mitigation 2 (per-call scope injection) maps to the `DelegationScope` dataclass added to the hook context.
 
-## AP-44 — Expert-blind team averaging (expertise dilution under integrative compromise)
+### AP-44 — Expert-blind team averaging (expertise dilution under integrative compromise)
 
 **TL;DR.** Multi-agent LLM teams consistently perform worse than their best single member — up to 37.6% capability loss — because no coordination primitive exists to route final decisions to the most capable agent for each subtask type. Teams default to averaging, majority-voting, or sequential delegation that dilutes specialist knowledge rather than amplifying it.
 
@@ -2275,7 +2275,7 @@ GitHub openai-agents-python#2868 (April 9, 2026) documents the production need e
 - [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/agent_coord.py` (Pattern 11) — `DriftMonitor` component provides the semantic divergence signal needed for mitigation 4: cosine distance across agent intent embeddings fires `on_drift` when team divergence exceeds threshold, distinguishing genuine disagreement (route to specialist) from mediocre consensus (averaging artifact).
 
 
-## AP-45 — Absent phase-gate barrier (parallel agents advancing without inter-phase synchronization)
+### AP-45 — Absent phase-gate barrier (parallel agents advancing without inter-phase synchronization)
 
 **TL;DR.** Parallel agent pipelines that lack explicit inter-phase synchronization allow phase N+1 agents to consume incomplete or partial outputs from phase N, compounding errors downstream. No standard framework provides a `Barrier(n_agents)` primitive; practitioners build thousands of lines of custom polling logic or accept silent corruption when agents advance prematurely.
 
@@ -2317,7 +2317,7 @@ GitHub openai-agents-python#2868 (April 9, 2026) documents the production need e
 - [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/agent_coord.py` (Pattern 11) — `Barrier(n_agents, phase_id)` component implements arrive-and-block semantics with SQLite backing; crash-recovery watchdog detects stale leases and marks incomplete phases as `DEGRADED` rather than silently advancing — the reference implementation for mitigations 1 and 3.
 
 
-## AP-46 — Stale-claim orphan deadlock (mid-task agent failure without lease recovery)
+### AP-46 — Stale-claim orphan deadlock (mid-task agent failure without lease recovery)
 
 **TL;DR.** When a worker agent crashes, errors, or is killed after claiming a task from the work queue but before releasing it, the claim record remains permanently asserted. Orchestrators and downstream phases block indefinitely on a completion signal that never arrives. No standard agent framework provides TTL-bearing claim leases, heartbeat-based lease renewal, or watchdog-driven claim reassignment — the three primitives needed to distinguish a live claim from a dead one.
 
@@ -2359,7 +2359,7 @@ GitHub openai-agents-python#2868 (April 9, 2026) documents the production need e
 - [`agent-memory-lab`](https://github.com/jimliu741523/agent-memory-lab) `patterns/agent_coord.py` (Pattern 11) — `WorkQueue.claim(task_id, ttl_secs)` + `CrashRecovery` component implements TTL-bearing leases with automatic stale-claim reassignment; heartbeat renewal via `lease.renew()`; watchdog escalation to `DEGRADED` state when `max_attempts` is exhausted — the reference implementation for mitigations 1–3.
 
 
-## AP-47 — Semantic intent divergence (cross-agent task interpretation drift without shared semantic anchor)
+### AP-47 — Semantic intent divergence (cross-agent task interpretation drift without shared semantic anchor)
 
 **TL;DR.** When a multi-agent pipeline dispatches the same high-level objective to parallel agents without a shared semantic anchor, each agent independently resolves ambiguous task parameters — scope, output format, quality/latency tradeoff, constraint priority — from its local context. The agents produce outputs that are individually coherent but semantically incompatible with each other. No standard framework inserts a semantic agreement checkpoint before agent execution; the divergence is invisible until the merge step, where the combiner receives inputs with fundamentally mismatched assumptions. The result is a silently wrong aggregated output or a cryptic combiner crash with no diagnostic signal pointing to the semantic root cause.
 
@@ -2398,7 +2398,7 @@ GitHub openai-agents-python#2868 (April 9, 2026) documents the production need e
 - arxiv 2602.01011 "Multi-Agent Teams Hold Experts Back" (February 2026) — LLM teams lose up to **37.6%** vs. their best individual member; integrative compromise (AP-44) is one mechanism; a second is that agents are dispatched without a shared operational definition of the task and diverge silently into incommensurable outputs before any compromise is attempted. ([arxiv](https://arxiv.org/abs/2602.01011))
 
 
-## AP-48 — Activation-blind tool selection (absent pre-execution selection-confidence gate)
+### AP-48 — Activation-blind tool selection (absent pre-execution selection-confidence gate)
 
 **Symptom.** An agent generates a tool name via autoregressive decoding and immediately submits the call for execution. When the model's internal selection confidence is low — specifically when the activation gap between the top-1 and top-2 competing tool choices is small — wrong-tool calls occur at 14–21x the rate of high-confidence selections on 12B–27B models (arxiv 2605.07990). The wrong tool executes, returns a structurally valid response, and the agent proceeds to completion with no exception, no 4xx, no loop counter increment. Symptom: incorrect final output with a clean trace — the only trace signal is a "successful" tool call to the wrong tool at the divergence point.
 
@@ -2431,7 +2431,7 @@ GitHub openai-agents-python#2868 (April 9, 2026) documents the production need e
 
 ---
 
-## AP-49 — Time-dependent memory coherence degradation (absent TTL/decay enforcement in long-running agents)
+### AP-49 — Time-dependent memory coherence degradation (absent TTL/decay enforcement in long-running agents)
 
 **Symptom.** After 24–72+ hours of continuous operation, an agent produces tool calls grounded in facts that were correct at write time but have since been superseded by newer observations or external state changes. Retrieved memories are syntactically valid, semantically coherent, and causally connected — making them indistinguishable from current facts during retrieval. Symptom: tool execution success degrades 14 percentage points over a 72-hour window with no change to the agent's model, tool definitions, or prompt template (arxiv 2605.03675 MemTier); the error trace shows a "successful" tool call built on stale assumptions with no exception, no 4xx, and no contradiction flag.
 
