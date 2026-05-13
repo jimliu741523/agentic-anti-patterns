@@ -2,12 +2,13 @@
 
 Newest on top. Each entry corresponds to a meaningful catalog change — new entry, structural reorganization, or scope shift. Cosmetic edits are not logged.
 
-## 2026-05-14 — quality audit (49 → 41 entries)
+## 2026-05-14 — quality audit (49 → 40 entries; two passes)
 
-Retired 8 entries that duplicated existing failure modes or were generated under cron-formula pressure with thin standalone signal. Numeric gaps preserved (no renumber) to keep external cross-references intact.
+Retired 9 entries that duplicated existing failure modes or were generated under cron-formula pressure with thin standalone signal. Numeric gaps preserved (no renumber) to keep external cross-references intact.
 
 - **AP-31** retired → covered by **AP-27** (multi-agent concurrent state corruption). Both describe "agents claim coordination without committed state."
 - **AP-37** retired → covered by **AP-10** (confidence inflation) + **AP-24** (memory write-path accumulation). Overconfident-belief-on-commit is a write-path quality problem already in AP-24's mitigation menu.
+- **AP-39** retired → covered by **AP-17** (RAG retrieval poisoning). AP-17 root cause already names gradient-tuned adversarial embeddings; AP-39 promoted that sub-case into its own entry without distinct mitigation surface.
 - **AP-41** retired → covered by **AP-01** (prompt injection via tool output). The "trusted-channel" framing didn't carve a meaningfully distinct mitigation surface.
 - **AP-45 / AP-46 / AP-47** retired → covered by **AP-27** (concurrent state corruption) — all three are "missing coordination primitive" sub-cases (barrier, lease, semantic anchor). AP-27's mitigation menu enumerates these.
 - **AP-48** retired → relies on model-internal mechanistic-interpretability signals (activation gaps, hidden-state probes) not portable across providers; out of scope for vendor-agnostic catalog.
